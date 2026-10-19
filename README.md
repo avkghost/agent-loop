@@ -5,7 +5,7 @@ An autonomous agent loop framework with extensible agents, skills, and MCP (Mode
 ## Overview
 
 **Agent Loop** is a Python-based agentic framework that:
-- Executes autonomous agent loops with Claude API
+- Executes autonomous agent loops through a compatible chat-completions API, primarily for locally hosted LLMs
 - Supports pluggable **agents** (personalized AI roles) and **skills** (capability packages)
 - Integrates **MCP tools** for external system access (APIs, files, commands)
 - Provides CLI with subcommands for interactive (`repl`) and one-shot (`run`) execution
@@ -42,6 +42,38 @@ agent_loop/
 ├── mcp_servers.json      # MCP server configuration
 └── AGENTS.md             # Project-specific rules
 ```
+
+## LLM Backends and API Compatibility
+
+Agent Loop separates the API protocol, the inference backend, and the language model:
+
+- **API protocol:** The client sends OpenAI-compatible chat-completions requests to `LM_STUDIO_URL`. Requests include streaming, model selection, and tool definitions; streamed responses are expected to use the corresponding chat-completions response format, including `tool_calls` when tools are used. Although a local service such as LM Studio may also offer a Claude-compatible mode, a Claude-compatible endpoint is not automatically supported by this implementation unless it accepts this request and response schema.
+- **Inference backend:** The service that runs the model. The primary development setup is a locally hosted LM Studio server. The repository also includes a configuration for a `llama-server` process from llama.cpp. A compatible API surface does not require Anthropic cloud services, and this client does not call Anthropic's API directly.
+- **Language model:** The model named by `MODEL_NAME`. The default configuration uses `zai-org/glm-4.7-flash`, which is the model used during development. Other models may work when the selected backend supports the request format, context size, streaming behavior, and tool-calling format required by the agent loop.
+
+API compatibility and model compatibility are separate concerns. A provider or local server that exposes a similarly named endpoint is not automatically supported: it must also return the response structure and tool-call behavior that this client parses.
+
+### LM Studio
+
+The default configuration connects to LM Studio's OpenAI-compatible chat-completions endpoint:
+
+```python
+LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
+MODEL_NAME = "zai-org/glm-4.7-flash"
+```
+
+Load a compatible model in LM Studio and make its model identifier available as `MODEL_NAME`. The current client does not configure an authentication token or send an API key; authentication settings offered by a backend are therefore not documented as supported configuration here. `LM_STUDIO_URL` is a historical name and is currently the generic endpoint used for every backend configuration.
+
+### llama.cpp
+
+The repository supports a direct llama.cpp setup when `llama-server` exposes the same OpenAI-compatible chat-completions endpoint expected by the client. The provided example starts the server with a Jinja chat template and points Agent Loop to it:
+
+```bash
+llama-server -m /path/to/GLM-4.7-Flash.gguf -c 131072 --jinja --port 8080
+python3 agent_loop.py run "Fix the bug" --config agent_loop.llamacpp.yaml
+```
+
+`agent_loop.llamacpp.yaml` uses `http://localhost:8080/v1/chat/completions`. No proxy or translation layer is used by Agent Loop. Tool calls therefore depend on the selected llama.cpp server mode, model, and chat template producing the compatible streaming response format; other llama.cpp configurations are not automatically supported.
 
 ## Installation
 
@@ -289,7 +321,7 @@ Skills provide restricted tool sets for specialized tasks.
 Key settings:
 
 ```python
-# LLM Model
+# LLM endpoint and model
 LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 MODEL_NAME = "zai-org/glm-4.7-flash"
 LM_STUDIO_TIMEOUT = 60
@@ -310,6 +342,8 @@ ALLOW_ALL = False                      # CLI --allow flag
 ```
 
 **Important:** Update `MODEL_CONTEXT_WINDOW` to match your loaded model's actual context size. See [Token Management](#token-management) for details.
+
+The name `LM_STUDIO_URL` is retained for compatibility, but it is used as the generic API endpoint for the selected backend. The current implementation has no separate provider or authentication setting. YAML configuration files can override `LM_STUDIO_URL`, `MODEL_NAME`, `MAX_ITERATIONS`, `MAX_TOKENS`, `COMPACT_THRESHOLD`, and `ALLOWED_TOOLS`; `MODEL_CONTEXT_WINDOW` and `REQUEST_MAX_TOKENS` are defined in `src/config.py` and are not YAML overrides.
 
 ### MCP Servers (mcp_servers.json)
 
@@ -356,16 +390,16 @@ Create `AGENTS.md` in the project root to inject custom rules into all agent sys
 python3 agent_loop.py run "Fix the bug" --config custom-config.yaml
 ```
 
-### Using llama.cpp instead of LM Studio
+### Using llama.cpp
 
-`agent_loop.llamacpp.yaml` points the agent at a llama.cpp server with the same model and a 131072-token context:
+`agent_loop.llamacpp.yaml` points the agent at a llama.cpp `llama-server` using the same model and a 131072-token context:
 
 ```bash
 llama-server -m /path/to/GLM-4.7-Flash.gguf -c 131072 --jinja --port 8080
 python3 agent_loop.py run "Fix the bug" --config agent_loop.llamacpp.yaml
 ```
 
-Only `LM_STUDIO_URL`, `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `COMPACT_THRESHOLD`, and `ALLOWED_TOOLS` can be set from a YAML file. `MODEL_CONTEXT_WINDOW` and `REQUEST_MAX_TOKENS` must be changed in `src/config.py`. The context size is set by the server's `-c` flag.
+This example requires a `llama-server` endpoint compatible with the client's OpenAI-style streaming chat-completions and tool-call format. The context size is set by the server's `-c` flag. Only `LM_STUDIO_URL`, `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `COMPACT_THRESHOLD`, and `ALLOWED_TOOLS` can be set from a YAML file. `MODEL_CONTEXT_WINDOW` and `REQUEST_MAX_TOKENS` must be changed in `src/config.py`.
 
 ### Response Caching
 
