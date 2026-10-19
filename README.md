@@ -642,7 +642,7 @@ TOOLS = [
 
 ## License
 
-MIT License (modify as needed)
+This project is licensed under the [MIT License](LICENSE).
 
 ## Contributing
 
