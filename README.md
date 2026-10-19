@@ -15,7 +15,7 @@ An autonomous agent loop framework with extensible agents, skills, and MCP (Mode
 ## Architecture
 
 ```
-agent_loop/
+agent-loop/
 ├── src/
 │   ├── main.py           # Entry point delegate
 │   ├── cli.py            # CLI argument parsing & routing
@@ -97,8 +97,8 @@ npm --version      # Should be 6+
 
 ```bash
 # Clone the repository
-git clone <repo-url>
-cd agent_loop
+git clone https://github.com/avkghost/agent-loop.git
+cd agent-loop
 
 # Install Python dependencies
 pip install -r requirements.txt

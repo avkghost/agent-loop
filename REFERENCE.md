@@ -274,7 +274,7 @@ python3 agent_loop.py repl
 ## File Structure for Reference
 
 ```
-agent_loop/
+agent-loop/
 ├── README.md              # Full documentation ← START HERE
 ├── EXAMPLES.md            # Detailed usage scenarios
 ├── REFERENCE.md           # This file (quick reference)
