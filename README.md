@@ -417,7 +417,7 @@ python3 agent_loop.py agent coder "Refactor the API" --allow
 
 Allows all defined tools without prompting.
 
-**Security warning:** `--allow` disables tool permission prompts. Use it only with trusted goals, models, and project directories. In particular, shell tools can execute commands and filesystem tools can modify or delete files; enabled MCP tools may also access external services or data. Avoid using `--allow` with untrusted instructions or in environments where tool actions could cause unintended changes.
+**Warning:** The `--allow` flag disables tool approval prompts. Use it only in trusted environments, especially when shell commands and filesystem write operations are available. Enabled MCP tools may also access external services or data.
 
 ## API Integration
 
@@ -445,14 +445,14 @@ asyncio.run(agent_loop_async(
 ### The Problem (Fixed)
 The agent loop was terminating prematurely after 4-5 iterations with error: `finish_reason: length`
 
-**Root Cause:** The API request was setting `max_tokens` to the total conversation budget (131,072) instead of a per-request limit. This did not force every response to be 128K tokens; it allowed a single request to reserve an excessively large output budget, leaving too little room for the prompt and accumulated conversation within the model's context. The resulting context/length failures caused the loop to stop after 4-5 iterations.
+**Root Cause:** The API request incorrectly used the total conversation budget (131,072 tokens) as the per-request output limit. This set an excessively large output allocation relative to the model's context window and contributed to premature termination.
 
 **The Fix:** 
 - Added configurable `MODEL_CONTEXT_WINDOW` (your model's actual token limit)
 - Added configurable `REQUEST_MAX_TOKENS` (reasonable per-request output limit, e.g., 8,192)
 - Updated loop to use `config.REQUEST_MAX_TOKENS` instead of `config.MAX_TOKENS`
 
-**Impact:** Loops now run 20-50+ iterations instead of 4-5, allowing complex multi-step tasks to complete.
+**Impact:** During development testing, the updated limits allowed loops to complete 20-50+ iterations instead of stopping after 4-5. Actual results depend on the model, context, prompts, and tool usage.
 
 ### Key Concepts
 - **MODEL_CONTEXT_WINDOW:** Your model's actual token limit (e.g., 131,072 for GLM-4.7-flash)
@@ -471,9 +471,11 @@ The agent loop was terminating prematurely after 4-5 iterations with error: `fin
 | Model | Context | Request Max | Strategy |
 |-------|---------|------------|----------|
 | Small (4K) | 4,096 | 1,024 | Conservative; many iterations |
-| Medium (8K) | 8,192 | 2,048 | Balanced; 15-20 iterations |
-| Large (16K-32K) | 16,384+ | 4,096-8,192 | Generous; 20-30 iterations |
-| XLarge (131K) | 131,072 | 8,192 | Full capacity; 50+ iterations |
+| Medium (8K) | 8,192 | 2,048 | Balanced; 15-20 observed in testing |
+| Large (16K-32K) | 16,384+ | 4,096-8,192 | Generous; 20-30 observed in testing |
+| XLarge (131K) | 131,072 | 8,192 | Full capacity; 50+ observed in testing |
+
+Iteration counts are observations from development testing, not guarantees; actual behavior varies by model, prompts, and tool usage.
 
 **Update for your model:**
 ```python
@@ -562,7 +564,7 @@ python3 -m pytest tests/ -v
 | `COMPACT_THRESHOLD` | 0.8 | Trigger compaction at 80% (104,858 tokens) |
 
 **Expected Behavior:**
-- Loops run 50+ iterations before token exhaustion
+- Development testing observed 50+ iterations before token exhaustion
 - Compaction activates automatically at 80% threshold
 - Agent can handle complex multi-step tasks
 
@@ -573,7 +575,7 @@ python3 -m pytest tests/ -v
 | 2026-10-19 | Loop ends prematurely after 4-5 iterations with `finish_reason: length` | Added configurable `REQUEST_MAX_TOKENS`; now properly respects model's context window | ✅ **Fixed** |
 
 **Previous:** API was requesting `max_tokens = 131,072` per response → token budget exhausted in 4-5 iterations  
-**Current:** API requests `max_tokens = 8,192` per response → room for 50+ iterations
+**Current:** API requests `max_tokens = 8,192` per response → testing observed room for 50+ iterations
 
 ---
 
