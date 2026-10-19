@@ -1,0 +1,11 @@
+# llama.cpp variant: same model and 131072-token context as src/config.py.
+# Start the server first:
+#   llama-server -m /path/to/GLM-4.7-Flash.gguf -c 131072 --jinja --port 8080
+# Run the agent with:
+#   python3 agent_loop.py run "goal" --config agent_loop.llamacpp.yaml
+
+LM_STUDIO_URL: "http://localhost:8080/v1/chat/completions"
+MODEL_NAME: "zai-org/glm-4.7-flash"
+MAX_TOKENS: 131072
+MAX_ITERATIONS: 100
+COMPACT_THRESHOLD: 0.8

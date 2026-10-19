@@ -356,6 +356,17 @@ Create `AGENTS.md` in the project root to inject custom rules into all agent sys
 python3 agent_loop.py run "Fix the bug" --config custom-config.yaml
 ```
 
+### Using llama.cpp instead of LM Studio
+
+`agent_loop.llamacpp.yaml` points the agent at a llama.cpp server with the same model and a 131072-token context:
+
+```bash
+llama-server -m /path/to/GLM-4.7-Flash.gguf -c 131072 --jinja --port 8080
+python3 agent_loop.py run "Fix the bug" --config agent_loop.llamacpp.yaml
+```
+
+Only `LM_STUDIO_URL`, `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `COMPACT_THRESHOLD`, and `ALLOWED_TOOLS` can be set from a YAML file. `MODEL_CONTEXT_WINDOW` and `REQUEST_MAX_TOKENS` must be changed in `src/config.py`. The context size is set by the server's `-c` flag.
+
 ### Response Caching
 
 ```bash
