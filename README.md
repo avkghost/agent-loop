@@ -541,7 +541,7 @@ After compaction:  6 messages (24,576 tokens) + summary
 **Solution:** Increase `REQUEST_MAX_TOKENS` (up to 1/3 of context window)
 
 **Symptom:** Out of memory errors  
-**Solution:** Decrease `REQUEST_MAX_TOKENS` or lower `COMPACT_THRESHOLD` to trigger compaction earlier
+**Solution:** First determine whether the issue is context-budget pressure or actual RAM/VRAM exhaustion. For context-budget pressure, decrease `REQUEST_MAX_TOKENS` or lower `COMPACT_THRESHOLD` to trigger compaction earlier. If RAM or VRAM is exhausted while loading or running the model, changing `REQUEST_MAX_TOKENS` alone may not help; use a smaller model or a backend configuration that fits available hardware.
 
 **Symptom:** Compaction never triggers  
 **Solution:** Check `COMPACT_THRESHOLD` (default 0.8 = 80%); lower it to trigger sooner
@@ -594,7 +594,7 @@ python3 -m pytest tests/ -v
 **Solution:** Ensure the configured LM Studio or llama.cpp server is running, then update `LM_STUDIO_URL` in `src/config.py` or the selected YAML configuration.
 
 ### Issue: Tool permission denied
-**Solution:** Use `--allow` flag to bypass permission prompts or add tools to `ALLOWED_TOOLS` in `src/config.py`.
+**Solution:** Prefer adding only the required tools to `ALLOWED_TOOLS` in `src/config.py`. As an alternative, `--allow` bypasses tool approval prompts; see [Bulk Tool Access](#bulk-tool-access) and use it only in trusted environments.
 
 ### Issue: Slow responses / timeouts
 **Solution:** Check the configured inference backend's performance and increase `LM_STUDIO_TIMEOUT` if appropriate. If individual generations are too long, reduce `REQUEST_MAX_TOKENS`; `MAX_TOKENS` is the total conversation budget, not the per-response output limit.
