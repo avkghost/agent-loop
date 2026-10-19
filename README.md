@@ -79,8 +79,8 @@ python3 agent_loop.py run "Fix the bug" --config agent_loop.llamacpp.yaml
 
 ### Prerequisites
 - **Python 3.8+** — Main runtime
-- **Node.js 14+** (with npm) — Required for MCP servers (context7, context-mode)
-- **LM Studio instance** with a model loaded (e.g., GLM-4.7-flash with 131K context)
+- **LM Studio or a compatible llama.cpp `llama-server`** — Choose an inference backend and load a compatible model
+- **Node.js 14+** (with npm) — Needed only when using MCP servers distributed through npm, such as Context7 or context-mode
 
 ### System Requirements Check
 
@@ -88,7 +88,7 @@ python3 agent_loop.py run "Fix the bug" --config agent_loop.llamacpp.yaml
 # Verify Python
 python3 --version  # Should be 3.8+
 
-# Verify Node.js & npm
+# Optional: verify Node.js & npm when using npm-based MCP servers
 node --version     # Should be 14+
 npm --version      # Should be 6+
 ```
@@ -103,9 +103,9 @@ cd agent-loop
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Install Node.js dependencies (for MCP servers)
+# Optional: prepare Node.js-based MCP servers
 # npx is included with npm 5.2+ (no additional setup needed)
-# The MCP servers will auto-download on first use via npx
+# Configured MCP servers will auto-download on first use via npx
 
 # (Optional) Pre-download MCP servers to avoid first-run delay
 npx -y @upstash/context7-mcp --help >/dev/null
@@ -417,6 +417,8 @@ python3 agent_loop.py agent coder "Refactor the API" --allow
 
 Allows all defined tools without prompting.
 
+**Security warning:** `--allow` disables tool permission prompts. Use it only with trusted goals, models, and project directories. In particular, shell tools can execute commands and filesystem tools can modify or delete files; enabled MCP tools may also access external services or data. Avoid using `--allow` with untrusted instructions or in environments where tool actions could cause unintended changes.
+
 ## API Integration
 
 ### Direct Python Usage
@@ -443,7 +445,7 @@ asyncio.run(agent_loop_async(
 ### The Problem (Fixed)
 The agent loop was terminating prematurely after 4-5 iterations with error: `finish_reason: length`
 
-**Root Cause:** The API request was setting `max_tokens` to the total conversation budget (131,072) instead of a per-request limit. Each response tried to output ~128KB of text, exhausting the context in just 4-5 iterations.
+**Root Cause:** The API request was setting `max_tokens` to the total conversation budget (131,072) instead of a per-request limit. This did not force every response to be 128K tokens; it allowed a single request to reserve an excessively large output budget, leaving too little room for the prompt and accumulated conversation within the model's context. The resulting context/length failures caused the loop to stop after 4-5 iterations.
 
 **The Fix:** 
 - Added configurable `MODEL_CONTEXT_WINDOW` (your model's actual token limit)
@@ -577,8 +579,8 @@ python3 -m pytest tests/ -v
 
 ## Troubleshooting
 
-### Issue: "Connection refused" for LM Studio
-**Solution:** Ensure LM Studio is running on `http://localhost:1234` or update `LM_STUDIO_URL` in `src/config.py`.
+### Issue: "Connection refused" for the inference backend
+**Solution:** Ensure the configured LM Studio or llama.cpp server is running, then update `LM_STUDIO_URL` in `src/config.py` or the selected YAML configuration.
 
 ### Issue: Tool permission denied
 **Solution:** Use `--allow` flag to bypass permission prompts or add tools to `ALLOWED_TOOLS` in `src/config.py`.
