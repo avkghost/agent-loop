@@ -103,13 +103,7 @@ cd agent-loop
 # Install Python dependencies
 pip install -r requirements.txt
 
-# Optional: prepare Node.js-based MCP servers
-# npx is included with npm 5.2+ (no additional setup needed)
-# Configured MCP servers will auto-download on first use via npx
-
-# (Optional) Pre-download MCP servers to avoid first-run delay
-npx -y @upstash/context7-mcp --help >/dev/null
-npx -y context-mode --help >/dev/null
+# Optional npm-based MCP server setup is described below
 
 # Create your MCP config from the template and add your API key
 cp mcp_servers.json.example mcp_servers.json
@@ -119,6 +113,21 @@ echo "# Your project guidelines" > AGENTS.md
 
 # Verify setup
 python3 -c "import requests, mcp, tiktoken, yaml, rich; print('✅ Python packages OK')"
+```
+
+#### Optional: npm-based MCP servers
+
+Use these commands only if the configured MCP servers use Node.js and `npx`:
+
+```bash
+# npx is included with npm 5.2+ (no additional setup needed)
+# Configured MCP servers will auto-download on first use via npx
+
+# Optional: pre-download MCP servers to avoid first-run delay
+npx -y @upstash/context7-mcp --help >/dev/null
+npx -y context-mode --help >/dev/null
+
+# Optional: verify the MCP server packages
 npx -y @upstash/context7-mcp --version 2>/dev/null && echo "✅ MCP servers OK"
 ```
 
@@ -588,7 +597,7 @@ python3 -m pytest tests/ -v
 **Solution:** Use `--allow` flag to bypass permission prompts or add tools to `ALLOWED_TOOLS` in `src/config.py`.
 
 ### Issue: Slow responses / timeouts
-**Solution:** Increase `LM_STUDIO_TIMEOUT` in `src/config.py` or reduce `MAX_TOKENS`.
+**Solution:** Check the configured inference backend's performance and increase `LM_STUDIO_TIMEOUT` if appropriate. If individual generations are too long, reduce `REQUEST_MAX_TOKENS`; `MAX_TOKENS` is the total conversation budget, not the per-response output limit.
 
 ### Issue: MCP tools not found
 **Solution:** Verify `mcp_servers.json` is properly configured and MCP servers are running.
