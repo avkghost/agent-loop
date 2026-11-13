@@ -1,10 +1,13 @@
-"""Integration tests for agent_loop with mocked LM Studio."""
+"""Integration tests for agent_loop with mocked LM Studio.
+
+Model replies are streamed (SSE) because that is the only response shape the loop reads.
+Tool dispatch is patched, so no shell command or file write runs.
+"""
 
 import sys
 import json
 import asyncio
-from unittest.mock import Mock, patch, MagicMock
-from io import StringIO
+from unittest.mock import patch, MagicMock
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -12,18 +15,73 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src import loop, envelope, config, prompts
 from src.tools.mcp_client import MCPClientManager
+from tests.conftest import protocol_violations
+
+
+class FakeStream:
+    """A non-streaming-compatible stand-in for requests.Response(stream=True), built from a reply dict."""
+
+    def __init__(self, reply):
+        choice = reply["choices"][0]
+        message = choice.get("message", {})
+        delta = {}
+        if message.get("content"):
+            delta["content"] = message["content"]
+        if message.get("tool_calls"):
+            delta["tool_calls"] = [dict(tc, index=i) for i, tc in enumerate(message["tool_calls"])]
+        chunks = [
+            {"choices": [{"delta": delta, "finish_reason": None}]},
+            {"choices": [{"delta": {}, "finish_reason": choice["finish_reason"]}]},
+        ]
+        self._lines = [f"data: {json.dumps(c)}" for c in chunks] + ["data: [DONE]"]
+
+    def raise_for_status(self):
+        return None
+
+    def iter_lines(self):
+        return iter(self._lines)
+
+
+def scripted_post(replies, summary_fails=True):
+    """requests.post replacement: model replies come from `replies`; summarizer calls (no tools) fail."""
+    queue = list(replies)
+
+    def post(url, json=None, timeout=None, stream=False):
+        if json is not None and "tools" not in json:
+            if summary_fails:
+                raise ConnectionError("summarizer unavailable in tests")
+            raise AssertionError("summarizer was not expected")
+        if not queue:
+            raise AssertionError("unexpected extra model request")
+        return FakeStream(queue.pop(0))
+
+    return post
+
+
+def run_agent(goal):
+    mcp_client = MCPClientManager()
+    event_loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(event_loop)
+    try:
+        event_loop.run_until_complete(loop.agent_loop_async(goal, mcp_client, event_loop))
+    finally:
+        event_loop.close()
 
 
 class TestIntegrationAgentLoop:
     """Integration tests for the agent loop with mocked LM Studio responses."""
 
     def setup_method(self):
-        """Reset state before each test."""
+        """Reset state before each test, remembering the globals so teardown can restore them."""
+        self._saved = (config.ALLOWED_TOOLS, config.HAS_SEARCHED_CODEBASE)
         config.ALLOWED_TOOLS = {"ls", "grep", "find"}
         config.HAS_SEARCHED_CODEBASE = False
 
+    def teardown_method(self):
+        config.ALLOWED_TOOLS, config.HAS_SEARCHED_CODEBASE = self._saved
+
     def mock_lm_studio_response(self, finish_reason: str, content: str = None, tool_calls: list = None):
-        """Create a mock LM Studio response."""
+        """Create a mock LM Studio response (chat-completions shape)."""
         message = {}
         if content:
             message["content"] = content
@@ -41,197 +99,126 @@ class TestIntegrationAgentLoop:
 
     @patch('src.loop.requests.post')
     def test_simple_completion(self, mock_post):
-        """Test agent loop with simple completion (no tool calls)."""
-        # Mock LM Studio to return a simple message and stop
-        mock_post.return_value.json.return_value = self.mock_lm_studio_response(
-            finish_reason="stop",
-            content="I've completed the task. The directory listing is ready."
-        )
+        """A reply without tool calls ends the run after one request."""
+        mock_post.side_effect = scripted_post([
+            self.mock_lm_studio_response(
+                finish_reason="stop",
+                content="I've completed the task. The directory listing is ready."
+            )
+        ])
 
-        # Create MCP client (will not be used in this test)
-        mcp_client = MCPClientManager()
+        run_agent("test task")
 
-        # Run the agent loop
-        event_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(event_loop)
-        event_loop.run_until_complete(loop.agent_loop_async("test task", mcp_client, event_loop))
+        assert mock_post.call_count == 1
+        payload = mock_post.call_args[1]["json"]
+        assert "messages" in payload and "tools" in payload
 
-        # Verify LM Studio was called
-        assert mock_post.called
-        call_args = mock_post.call_args
-        assert "messages" in call_args[1]["json"]
-        assert "tools" in call_args[1]["json"]
-
+    @patch('src.dispatch.dispatch_tool', return_value="ls output")
     @patch('src.loop.requests.post')
-    def test_tool_call_sequence(self, mock_post):
-        """Test agent loop with tool call → observation → completion."""
-        # First call: model decides to use run_command
-        # Second call: model receives observation and completes
-        responses = [
+    def test_tool_call_sequence(self, mock_post, mock_dispatch):
+        """A tool call is dispatched once, its result is sent back, and the run completes."""
+        mock_post.side_effect = scripted_post([
             self.mock_lm_studio_response(
                 finish_reason="tool_calls",
                 content="I'll list the files for you.",
-                tool_calls=[
-                    {
-                        "id": "call_1",
-                        "function": {
-                            "name": "run_command",
-                            "arguments": json.dumps({"command": "ls"})
-                        }
-                    }
-                ]
+                tool_calls=[{"id": "call_1", "function": {"name": "run_command",
+                                                          "arguments": json.dumps({"command": "ls"})}}]
             ),
-            self.mock_lm_studio_response(
-                finish_reason="stop",
-                content="Here are the files in the directory."
-            )
-        ]
+            self.mock_lm_studio_response(finish_reason="stop", content="Here are the files in the directory.")
+        ])
 
-        mock_post.return_value.json.side_effect = responses
+        run_agent("list files")
 
-        # Create MCP client
-        mcp_client = MCPClientManager()
+        assert mock_dispatch.call_count == 1
+        assert mock_post.call_count == 2
+        second = mock_post.call_args_list[1][1]["json"]["messages"]
+        results = [m for m in second if m.get("role") == "tool"]
+        assert [m["tool_call_id"] for m in results] == ["call_1"]
+        assert not protocol_violations(second)
 
-        # Run the agent loop
-        event_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(event_loop)
-        event_loop.run_until_complete(loop.agent_loop_async("list files", mcp_client, event_loop))
-
-        # Verify two calls to LM Studio (first for tool decision, second after tool result)
-        assert mock_post.call_count >= 1
-
+    @patch('src.dispatch.dispatch_tool', return_value="file written")
     @patch('src.loop.requests.post')
-    def test_write_file_with_search_warning(self, mock_post):
-        """Test write_file tool shows warning when codebase hasn't been searched."""
-        responses = [
+    def test_write_file_with_search_warning(self, mock_post, mock_dispatch):
+        """A write_file call is dispatched with its arguments, then the run completes."""
+        mock_post.side_effect = scripted_post([
             self.mock_lm_studio_response(
                 finish_reason="tool_calls",
                 content="I'll create a new file.",
-                tool_calls=[
-                    {
-                        "id": "call_1",
-                        "function": {
-                            "name": "write_file",
-                            "arguments": json.dumps({
-                                "path": "new_file.txt",
-                                "content": "Hello, world!"
-                            })
-                        }
-                    }
-                ]
+                tool_calls=[{"id": "call_1", "function": {"name": "write_file", "arguments": json.dumps({
+                    "path": "new_file.txt", "content": "Hello, world!"})}}]
             ),
-            self.mock_lm_studio_response(
-                finish_reason="stop",
-                content="File created."
-            )
-        ]
+            self.mock_lm_studio_response(finish_reason="stop", content="File created.")
+        ])
 
-        mock_post.return_value.json.side_effect = responses
+        run_agent("create a file")
 
-        # Ensure HAS_SEARCHED_CODEBASE is False
-        config.HAS_SEARCHED_CODEBASE = False
+        assert mock_dispatch.call_args[0][0] == "write_file"
+        assert mock_dispatch.call_args[0][1] == {"path": "new_file.txt", "content": "Hello, world!"}
+        assert mock_post.call_count == 2
 
-        mcp_client = MCPClientManager()
-
-        # Run the agent loop (with output capture to check for warning)
-        event_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(event_loop)
-        event_loop.run_until_complete(loop.agent_loop_async("create a file", mcp_client, event_loop))
-
-        # Verify tool was called
-        assert mock_post.call_count >= 1
-
-    @patch('builtins.input', return_value='3')  # Mock input to deny permission
+    @patch('src.dispatch.dispatch_tool', side_effect=lambda *a, **k: "x" * 4000)
     @patch('src.loop.requests.post')
-    def test_context_compaction(self, mock_post, mock_input):
-        """Test context compaction when token limit is approached."""
-        # Create responses that will trigger many iterations
-        responses = [
+    def test_context_compaction(self, mock_post, mock_dispatch):
+        """Forced compaction: the summarizer is attempted, falls back to truncation, and every
+        request stays protocol-valid until the run completes."""
+        tool_turns = [
             self.mock_lm_studio_response(
                 finish_reason="tool_calls",
-                content="Tool call 1",
-                tool_calls=[{
-                    "id": f"call_{i}",
-                    "function": {
-                        "name": "run_command",
-                        "arguments": json.dumps({"command": "echo test"})
-                    }
-                }]
+                content=f"Tool call {i}",
+                tool_calls=[{"id": f"call_{i}", "function": {"name": "run_command",
+                                                             "arguments": json.dumps({"command": "echo test"})}}]
             )
             for i in range(5)
-        ] + [
-            self.mock_lm_studio_response(
-                finish_reason="stop",
-                content="Completed"
-            )
         ]
+        mock_post.side_effect = scripted_post(
+            tool_turns + [self.mock_lm_studio_response(finish_reason="stop", content="Completed")])
 
-        mock_post.return_value.json.side_effect = responses
-
-        mcp_client = MCPClientManager()
-
-        # Lower the compaction threshold for testing
-        original_threshold = config.COMPACT_THRESHOLD
-        config.COMPACT_THRESHOLD = 0.5  # Trigger compaction sooner
-
+        original = (config.MAX_TOKENS, config.COMPACT_THRESHOLD)
+        system_tokens = len(prompts.SYSTEM_PROMPT) // 4
+        config.MAX_TOKENS = system_tokens + 2000  # forces compaction once several 1000-token results accumulate
+        config.COMPACT_THRESHOLD = 1.0
         try:
-            event_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(event_loop)
-            event_loop.run_until_complete(loop.agent_loop_async("repeated task", mcp_client, event_loop))
-            # If compaction was triggered, the loop still completes successfully
-            assert True
+            run_agent("repeated task")
         finally:
-            config.COMPACT_THRESHOLD = original_threshold
+            config.MAX_TOKENS, config.COMPACT_THRESHOLD = original
+
+        loop_requests = [c[1]["json"] for c in mock_post.call_args_list if "tools" in c[1]["json"]]
+        summary_attempts = [c for c in mock_post.call_args_list if "tools" not in c[1]["json"]]
+        assert len(summary_attempts) >= 1, "compaction never attempted a summary"
+        assert len(loop_requests) == 6, "the run must reach the final completion"
+        for index, body in enumerate(loop_requests):
+            assert not protocol_violations(body["messages"]), f"request {index}: {protocol_violations(body['messages'])}"
 
     @patch('src.loop.requests.post')
     def test_lm_studio_error_handling(self, mock_post):
-        """Test graceful handling of LM Studio communication errors."""
+        """A transport error ends the run without raising out of the loop."""
         mock_post.side_effect = Exception("Connection refused")
 
-        mcp_client = MCPClientManager()
+        run_agent("test task")
 
-        # Run the agent loop (should handle error gracefully)
-        event_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(event_loop)
-        event_loop.run_until_complete(loop.agent_loop_async("test task", mcp_client, event_loop))
+        assert mock_post.call_count == 1
 
-        # Verify error was raised and caught
-        assert mock_post.called
-
-    @patch('builtins.input', return_value='3')  # Mock input to deny permission
+    @patch('src.dispatch.dispatch_tool', return_value="ok")
     @patch('src.loop.requests.post')
-    def test_max_iterations_limit(self, mock_post, mock_input):
-        """Test that agent loop stops at MAX_ITERATIONS."""
-        # Create a response that always returns tool_calls without completion
-        response = self.mock_lm_studio_response(
+    def test_max_iterations_limit(self, mock_post, mock_dispatch):
+        """The run makes exactly MAX_ITERATIONS requests when every reply asks for a tool."""
+        always_tools = [self.mock_lm_studio_response(
             finish_reason="tool_calls",
             content="I'll run a command",
-            tool_calls=[{
-                "id": "call_1",
-                "function": {
-                    "name": "run_command",
-                    "arguments": json.dumps({"command": "echo test"})
-                }
-            }]
-        )
+            tool_calls=[{"id": f"call_{i}", "function": {"name": "run_command",
+                                                      "arguments": json.dumps({"command": "echo test"})}}]
+        ) for i in range(10)]
+        mock_post.side_effect = scripted_post(always_tools)
 
-        mock_post.return_value.json.return_value = response
-
-        mcp_client = MCPClientManager()
-
-        # Lower MAX_ITERATIONS for testing
         original_max = config.MAX_ITERATIONS
         config.MAX_ITERATIONS = 3
-
         try:
-            event_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(event_loop)
-            event_loop.run_until_complete(loop.agent_loop_async("infinite task", mcp_client, event_loop))
-            # Should reach max iterations and stop
-            # Call count should be around MAX_ITERATIONS (3)
-            assert mock_post.call_count <= 5  # Some buffer for tool calls
+            run_agent("infinite task")
         finally:
             config.MAX_ITERATIONS = original_max
+
+        assert mock_post.call_count == 3
+        assert mock_dispatch.call_count == 3
 
     def test_envelope_functions(self):
         """Test structured error envelope functions."""

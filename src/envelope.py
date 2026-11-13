@@ -8,6 +8,7 @@ CATEGORY_TRANSIENT = "transient"      # Timeouts, service unavailable, rate limi
 CATEGORY_VALIDATION = "validation"    # Invalid input format, malformed data
 CATEGORY_BUSINESS = "business"        # Business rule violation (not used in this agent)
 CATEGORY_PERMISSION = "permission"    # Access denied, path outside boundary
+CATEGORY_UNKNOWN_OUTCOME = "unknown_outcome"  # Tool raised; its side effects may or may not have happened
 
 def success(content: str) -> Dict[str, Any]:
     """Successful tool result (not an error)."""
@@ -51,6 +52,73 @@ def error_permission(content: str, description: Optional[str] = None) -> Dict[st
         "isRetryable": False,
         "description": description,
     }
+
+class ToolExecutionError(Exception):
+    """An explicit tool-boundary failure with an unknown external outcome.
+
+    Dispatcher implementations may raise this when an operation may have started
+    but did not produce a reliable result. Ordinary programming errors must use
+    normal exceptions so they are not misreported as external side effects.
+    """
+
+
+def error_unknown_outcome(content: str, description: Optional[str] = None) -> Dict[str, Any]:
+    """Tool raised an exception. The outcome is unknown, so the call is never marked retryable."""
+    return {
+        "content": content,
+        "isError": True,
+        "errorCategory": CATEGORY_UNKNOWN_OUTCOME,
+        "isRetryable": False,
+        "description": description,
+    }
+
+
+_MISSING = object()
+
+
+def mcp_result_envelope(tool_name: str, result: Any) -> Dict[str, Any]:
+    """Convert an MCP call result into an envelope, validating its structure first.
+
+    A result that is missing, has an unexpected shape, or has malformed content is never
+    reported as success: the call was already submitted, so its outcome is unknown.
+    Valid empty content is a successful empty result.
+    """
+    malformed = error_unknown_outcome(
+        f"MCP tool {tool_name} returned a malformed response; its outcome cannot be verified. It was not retried.",
+        description="The response did not match the MCP result structure.",
+    )
+    if result is None:
+        return malformed
+    if isinstance(result, dict):
+        content = result.get("content", _MISSING)
+        is_error = result.get("isError", False)
+    else:
+        content = getattr(result, "content", _MISSING)
+        is_error = getattr(result, "isError", False)
+    if content is _MISSING or not isinstance(content, list) or not isinstance(is_error, bool):
+        return malformed
+
+    parts = []
+    for item in content:
+        if isinstance(item, dict):
+            text, kind = item.get("text"), item.get("type")
+        else:
+            text, kind = getattr(item, "text", None), getattr(item, "type", None)
+        if isinstance(text, str):
+            parts.append(text)
+        elif isinstance(kind, str) and kind:
+            parts.append(f"[{kind} content omitted]")  # non-text MCP content is not representable here
+        else:
+            return malformed
+    body = "\n".join(parts)
+    if is_error:
+        return error_unknown_outcome(
+            body or f"MCP tool {tool_name} reported an error.",
+            description="The remote tool reported an error after the call was submitted; "
+                        "side effects may have occurred. It was not retried.",
+        )
+    return success(body)
+
 
 def normalize_mcp_result(mcp_result: Dict[str, Any]) -> Dict[str, Any]:
     """Normalize an MCP CallToolResult into our envelope shape."""

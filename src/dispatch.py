@@ -5,8 +5,48 @@ import json
 from typing import Dict, Any, Optional
 
 from . import config, envelope
+from .envelope import ToolExecutionError  # re-exported: dispatch.ToolExecutionError
 from .tools import shell, files
 from .tools.mcp_client import MCPClientManager
+
+
+def _mcp_gate(tool_name: str, tool_input: Dict[str, Any], mcp_client: Optional[MCPClientManager]):
+    """Checks shared by both dispatch entry points. Returns a result to send back, or None to proceed."""
+    if not mcp_client:
+        return envelope.error_validation(
+            "MCP tool requested but MCP client not initialized",
+            fixable=False
+        )
+    if tool_name not in config.ALLOWED_MCP_TOOLS and not config.ALLOW_ALL:
+        return {
+            "requiresPermission": True,
+            "kind": "mcp_tool",
+            "identifier": tool_name,
+            "arguments": tool_input
+        }
+    return None
+
+
+async def dispatch_tool_async(tool_name: str, tool_input: Dict[str, Any], mcp_client: Optional[MCPClientManager] = None,
+                              event_loop: Optional[asyncio.AbstractEventLoop] = None,
+                              allowed_tools: Optional[list] = None) -> Dict[str, Any]:
+    """Awaitable dispatch for use inside the running agent loop.
+
+    MCP calls are awaited directly on the current event loop, so the transport is reached
+    without nesting run_until_complete. Local tools run synchronously, exactly as in dispatch_tool.
+    """
+    if not (isinstance(tool_name, str) and tool_name.startswith("mcp_")):
+        return dispatch_tool(tool_name, tool_input, mcp_client, event_loop, allowed_tools=allowed_tools)
+
+    if allowed_tools and isinstance(allowed_tools, list) and len(allowed_tools) > 0:
+        if tool_name not in allowed_tools:
+            return envelope.error_permission(
+                f"Tool '{tool_name}' is not permitted for this skill (allowed: {', '.join(allowed_tools)})"
+            )
+    gate = _mcp_gate(tool_name, tool_input, mcp_client)
+    if gate is not None:
+        return gate
+    return await mcp_client.call_tool(tool_name, tool_input)
 
 
 def dispatch_tool(tool_name: str, tool_input: Dict[str, Any], mcp_client: Optional[MCPClientManager] = None,
@@ -75,40 +115,19 @@ def dispatch_tool(tool_name: str, tool_input: Dict[str, Any], mcp_client: Option
 
     # Handle MCP tools
     elif tool_name.startswith("mcp_"):
-        if not mcp_client:
-            return envelope.error_validation(
-                f"MCP tool requested but MCP client not initialized",
-                fixable=False
-            )
+        gate = _mcp_gate(tool_name, tool_input, mcp_client)
+        if gate is not None:
+            return gate
 
-        # Check if the MCP tool is allowed
-        if tool_name not in config.ALLOWED_MCP_TOOLS:
-            if not config.ALLOW_ALL:
-                # Return permission request sentinel
-                return {
-                    "requiresPermission": True,
-                    "kind": "mcp_tool",
-                    "identifier": tool_name,
-                    "arguments": tool_input
-                }
-
-        # Call the MCP tool async via the event loop
+        # Synchronous callers only. Inside the agent loop use dispatch_tool_async, because the
+        # loop already runs an event loop and run_until_complete cannot be nested.
         if not event_loop:
             return envelope.error_validation(
                 "Event loop not available for MCP tool call",
                 fixable=False
             )
 
-        try:
-            result = event_loop.run_until_complete(
-                mcp_client.call_tool(tool_name, tool_input)
-            )
-            return result
-        except Exception as e:
-            return envelope.error_transient(
-                f"Error calling MCP tool: {str(e)}",
-                description="Failed to dispatch the MCP tool call."
-            )
+        return event_loop.run_until_complete(mcp_client.call_tool(tool_name, tool_input))
 
     else:
         return envelope.error_validation(

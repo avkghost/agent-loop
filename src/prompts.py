@@ -40,9 +40,8 @@ You have access to local tools (run_command, write_file) and may have additional
 **Timeout Control for Long-Running Tasks:**
 - Default timeout: 120 seconds (2 minutes)
 - Use shell `timeout` command for custom timeouts: `timeout 60 command` (runs command, kills after 60s)
-- Background execution: `timeout 300 long_process &` (runs in background with 5-minute timeout)
-- Check background jobs: `jobs` (list running background jobs)
-- Terminate background job: `kill %1` (kill job number 1)
+- Background start: a command ending in `&` starts the process and returns its PID immediately. Only the start is confirmed: completion is not tracked and the output is discarded unless the command redirects it to a file.
+- Agent Loop does not provide a shared job list or job-control state for background processes. Use an external process manager if lifecycle control is required.
 
 **Examples:**
 - Long compilation with custom timeout: `timeout 180 make build`

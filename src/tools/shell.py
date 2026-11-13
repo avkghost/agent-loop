@@ -83,22 +83,29 @@ def execute_command(command_str: str) -> Dict[str, Any]:
 
     # Check if command runs in background (ends with &)
     is_background = command_str.rstrip().endswith('&')
+    if is_background:
+        # Strip the trailing '&' so it is not passed to the program as an argument
+        command_str = command_str.rstrip()[:-1].rstrip()
+        uses_shell = _has_shell_operators(command_str)
 
     # Execute the command (with shell=True for shell operators, False otherwise)
     try:
         if is_background:
-            # Background execution: don't wait for completion
+            # Background execution: start the process and return without waiting.
+            # Output is discarded (DEVNULL) so a full pipe cannot block the process;
+            # commands that need output should redirect it to a file themselves.
             result = subprocess.Popen(
                 command_str if uses_shell else shlex.split(command_str),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
                 shell=uses_shell
             )
             pid = result.pid
             return envelope.success(
                 f"[Background process started - PID: {pid}]\n"
-                f"Process is running. Use 'jobs' to list or 'kill {pid}' to stop."
+                f"Started only: completion is not tracked, and the output is discarded "
+                f"unless the command redirects it to a file."
             )
         else:
             # Foreground execution: wait for completion
@@ -116,16 +123,21 @@ def execute_command(command_str: str) -> Dict[str, Any]:
                 return envelope.success(output)
             else:
                 return envelope.success("[Command completed with no visual output]")
+    except (FileNotFoundError, PermissionError, NotADirectoryError) as e:
+        # The program could not be started, so nothing ran and retrying is pointless
+        return envelope.error_validation(
+            f"Error: could not start command: {e}",
+            fixable=False
+        )
     except subprocess.TimeoutExpired:
-        return envelope.error_transient(
-            "Error: Command timed out after 15 seconds.",
-            description="The command took too long to execute. Try a simpler command or check for infinite loops."
+        # The process was stopped, but partial effects are possible, so the outcome is unknown
+        raise envelope.ToolExecutionError(
+            "Command timed out after 120 seconds and was stopped. It may have partly run; it was not retried."
         )
     except Exception as e:
-        return envelope.error_transient(
-            f"Error: {type(e).__name__}: {str(e)}",
-            description="An error occurred while executing the command."
-        )
+        raise envelope.ToolExecutionError(
+            f"Command failed with {type(e).__name__}: {e}. It may have partly run; it was not retried."
+        ) from e
 
 def mark_shell_command_approved(command_str: str) -> None:
     """Mark a shell command as approved for the session."""

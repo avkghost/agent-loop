@@ -141,30 +141,26 @@ class MCPClientManager:
                 fixable=False
             )
 
-        # Call the tool with timeout
+        # Everything below happens after the call may have been submitted, so any failure
+        # leaves the external outcome unknown. Such failures are never retried automatically.
         try:
             result = await asyncio.wait_for(
                 session.call_tool(tool_name, arguments),
                 timeout=30.0
             )
-
-            # Normalize the result
-            return envelope.normalize_mcp_result({
-                "content": result.content if hasattr(result, "content") else str(result),
-                "isError": result.isError if hasattr(result, "isError") else False,
-            })
-
         except asyncio.TimeoutError:
-            return envelope.error_transient(
-                f"MCP tool {prefixed_name} timed out after 30 seconds.",
-                description="The MCP server took too long to respond."
+            return envelope.error_unknown_outcome(
+                f"MCP tool {prefixed_name} timed out after 30 seconds. It may have executed; it was not retried.",
+                description="The call was submitted and no response arrived in time.",
+            )
+        except Exception as e:  # CancelledError and other BaseExceptions propagate untouched
+            return envelope.error_unknown_outcome(
+                f"MCP tool {prefixed_name} failed during transport ({type(e).__name__}). "
+                "It may have executed; it was not retried.",
+                description="The connection failed after the call may have been submitted.",
             )
 
-        except Exception as e:
-            return envelope.error_transient(
-                f"MCP tool error: {str(e)}",
-                description="Error communicating with the MCP server."
-            )
+        return envelope.mcp_result_envelope(prefixed_name, result)
 
     async def close_all(self) -> None:
         """Close all MCP server connections gracefully."""

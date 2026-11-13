@@ -240,6 +240,7 @@ python3 agent_loop.py tools --config my-config.yaml
 python3 agent_loop.py sessions          # List saved sessions
 python3 agent_loop.py resume <session-id> # Resume a session
 ```
+`resume` restores the saved conversation. A tool call that was in progress when the process stopped is answered as interrupted and is not run again. See "Tool Failures, Interruptions, and Limits" under Token Management.
 
 ### Command-Line Options
 
@@ -525,16 +526,35 @@ This is approximate. For precise counting, consider using the `tiktoken` library
 When messages exceed 80% of `MAX_TOKENS`:
 
 **Step 1: LLM-based summarization (preferred)**
-- Keeps: system prompt + last 4 messages
-- Summarizes: everything in between
-- Result: Preserves key context while reducing token count
+- Keeps: structured state containing the original objective (verbatim), the replaceable current summary, and the recent tail (last 4 messages, moved forward if needed so the tail never starts with a tool result)
+- Summarizes: everything between the system prompt and that tail
+- The provider-facing message is derived from that state; message text and summary labels are never parsed back as state metadata.
+- Each successful compaction replaces the previous summary rather than appending another summary.
+- Rejected, and falls back to Step 2, when the request times out or fails, the reply is malformed or empty, or the summary exceeds 20% of `MAX_TOKENS` (heuristic: 4 characters per token)
 
 **Step 2: Hard truncation (fallback)**
-- Keeps: system prompt + last 4 messages
-- Discards: everything else
-- Used if LLM summarization fails
+- Keeps: system prompt, the original objective (verbatim), and the largest protocol-valid recent tail that fits the budget
+- Discards: the replaceable summary and other older context, including whole tool-call groups that fall outside the tail
+- Used if LLM summarization is rejected or fails
+- If the system prompt, objective, and required protocol context cannot fit, the run stops with an explicit compaction error before another provider request.
 
-**Example:**
+Compaction runs at most once per loop iteration and never re-dispatches a tool.
+
+Sessions saved by the current runtime use format 4, with `objective`, `summary`, `messages`, and durable `execution` records persisted as separate fields. Format 3 sessions may resume without execution history; clean objective-only format 2 or unversioned sessions may also resume. Legacy histories containing merged summary markers are rejected as ambiguous rather than reinterpreted.
+
+### Tool Failures, Interruptions, and Limits
+
+- **Explicit tool execution failures** are recorded as a terminal result for that call, marked `unknown_outcome` and not retryable. The run continues with the next call. The tool is never retried automatically, because it may already have had an effect. Unexpected programming errors are not converted into tool results.
+- **Durable tool-call state.** Each call is persisted as `pending` before dispatch, `running` before external invocation, and then as `completed`, `failed`, or `unknown`. These records are authoritative and survive compaction; they are not reconstructed from summaries. A persistence failure stops execution before another external invocation.
+- **Interrupted runs.** Each assistant turn and each tool result is saved as it is recorded. If the process stops while a call is in progress, `resume` answers that call as interrupted. It does **not** re-run it. Whether its side effect happened is unknown and must be checked by hand.
+- **Resume restores the conversation history and the durable call records.** It does not restore an agent's position inside a loop iteration, and it cannot tell whether an unknown external effect happened. This is not crash-safe recovery and is not exactly-once execution.
+- **MCP calls** are awaited on the running agent loop. A validation error before submission (for example an invalid tool name) is a definitive failure. A transport failure, timeout, malformed response, or remote `isError` after submission is `unknown_outcome` and is never retried, because the remote side may already have acted.
+- **File writes** encode the content first and write a temporary file in the same directory before replacing the target. A failure before the replacement leaves the existing file unchanged and is reported as a definitive failure. Only a replacement that reports an error after the temporary file was consumed is `unknown_outcome`. `read_file` accepts UTF-8 text only; binary content is refused as a validation error.
+- **Path containment** is checked on resolved paths (symlinks followed) by path component. It is not an operating-system sandbox and does not defend against other processes changing the filesystem concurrently.
+- **Session writes** are replaced atomically (temporary file, then rename), so an interrupted write keeps the previous session file. Durability on power loss is not guaranteed.
+- **Background commands** (ending in `&`) start the process and return its PID. Only the start is confirmed. Completion is not tracked, and output is discarded unless the command redirects it to a file. There is no job list or job-control state; lifecycle control needs an external process manager.
+
+**Example (illustrative, not a measured run):**
 ```
 Before compaction: 45 messages (116,736 tokens / 131,072 = 89%)
 After compaction:  6 messages (24,576 tokens) + summary

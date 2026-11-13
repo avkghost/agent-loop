@@ -6,9 +6,11 @@ import requests
 from pathlib import Path
 from typing import Optional
 
-from . import config, envelope, prompts, dispatch, render
+from . import config, envelope, prompts, dispatch, render, compaction, session, execution
 from .tools import get_all_tools
 from .tools.mcp_client import MCPClientManager
+
+INTERRUPTED_RESULT = execution.INTERRUPTED_RESULT
 
 
 def _get_single_key_input(prompt: str, valid_keys: list) -> str:
@@ -65,8 +67,111 @@ def get_token_count(text):
     return len(text) // 4
 
 
+def check_goal(goal: str) -> str:
+    """Validate the goal without assigning structural meaning to its text."""
+    return goal
+
+
+def _declare_tool_call(tool_call):
+    """Normalize a streamed tool call into the declaration shape sent back to the provider."""
+    function = tool_call.get("function", {})
+    return {
+        "id": tool_call.get("id"),
+        "type": "function",
+        "function": {
+            "name": function.get("name"),
+            "arguments": function.get("arguments", "{}"),
+        },
+    }
+
+
+def _validate_tool_call_batch(tool_calls, journal):
+    """Validate provider call identifiers before mutating history or journal state."""
+    seen = set()
+    for tool_call in tool_calls:
+        call_id = tool_call.get("id")
+        if not isinstance(call_id, str) or not call_id:
+            return False, "Model returned a tool call without a valid tool_call_id."
+        if call_id in seen or journal.get(call_id) is not None:
+            return False, f"Model returned duplicate tool_call_id: {call_id}"
+        seen.add(call_id)
+    return True, None
+
+
+def _answer_interrupted_calls(messages):
+    """On resume, answer trailing tool calls that have no recorded result.
+
+    They are never re-executed: the tool may already have run before the interruption.
+    """
+    last = None
+    for i, m in enumerate(messages):
+        if m.get("role") == "assistant" and m.get("tool_calls"):
+            last = i
+    if last is None:
+        return messages
+    answered = {m.get("tool_call_id") for m in messages[last + 1:] if m.get("role") == "tool"}
+    for tc in messages[last]["tool_calls"]:
+        if tc.get("id") not in answered:
+            messages.append({"role": "tool", "tool_call_id": tc.get("id"), "content": INTERRUPTED_RESULT})
+    return messages
+
+
+async def _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, allowed_tools):
+    """Dispatch one call inside the running loop. An explicit tool failure becomes a terminal result.
+
+    Only ToolExecutionError is converted. Other exceptions are programming defects and propagate.
+    BaseException (KeyboardInterrupt, SystemExit, asyncio cancellation) propagates too. The tool is never
+    retried, because it may already have had a side effect. event_loop is accepted for compatibility;
+    the await runs on the loop that is already active.
+    """
+    try:
+        return await dispatch.dispatch_tool_async(tool_name, tool_input, mcp_client, event_loop, allowed_tools=allowed_tools)
+    except dispatch.ToolExecutionError as e:
+        return envelope.error_unknown_outcome(
+            f"Tool '{tool_name}' raised {type(e).__name__}: {e}. Its outcome is unknown and it was not retried. "
+            "Verify its effects before relying on it."
+        )
+
+
+def _serialize_observation(observation):
+    """Convert a tool observation into the string sent back to the model."""
+    if isinstance(observation, dict) and "isError" in observation:
+        return envelope.serialize_for_model(observation)
+    return str(observation)
+
+
+def _recover_execution_messages(messages, journal):
+    """Materialize persisted terminal outcomes without redispatching calls."""
+    declared = {
+        tool_call.get("id")
+        for message in messages
+        if message.get("role") == "assistant"
+        for tool_call in message.get("tool_calls", [])
+    }
+    recorded = {
+        message.get("tool_call_id")
+        for message in messages
+        if message.get("role") == "tool"
+    }
+    for record in journal.records:
+        if record.status in (
+            execution.ToolCallStatus.COMPLETED,
+            execution.ToolCallStatus.FAILED,
+            execution.ToolCallStatus.UNKNOWN,
+        ) and record.tool_call_id in declared and record.tool_call_id not in recorded:
+            messages.append({
+                "role": "tool",
+                "tool_call_id": record.tool_call_id,
+                "content": record.outcome,
+            })
+    return messages
+
+
 async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_loop: asyncio.AbstractEventLoop,
-                            system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None) -> None:
+                            system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
+                            session_id: Optional[str] = None, resume_messages: Optional[list] = None,
+                            resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
+                            resume_execution: Optional[list] = None) -> None:
     """Main agent loop (async version for MCP support).
 
     Args:
@@ -86,10 +191,49 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
         print(f"📋 Loaded project guidelines from AGENTS.md")
         system_prompt = f"{project_guidelines}\n\n{system_prompt}"
 
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": f"Objective: {user_goal}"}
-    ]
+    check_goal(user_goal)
+    if resume_objective is not None:
+        objective = resume_objective
+    elif resume_messages:
+        objective = next(
+            (m.get("content") for m in resume_messages if m.get("role") == "user"),
+            f"Objective: {user_goal}",
+        )
+    else:
+        objective = f"Objective: {user_goal}"
+    state = compaction.CompactionState(objective=objective, summary=resume_summary)
+    journal = execution.ExecutionJournal.from_dicts(
+        resume_execution if resume_execution is not None else []
+    )
+    if resume_messages is not None:
+        messages = compaction.restore_structured_state(list(resume_messages), state)
+        journal.recover_unresolved(INTERRUPTED_RESULT)
+        messages = _recover_execution_messages(messages, journal)
+        messages = _answer_interrupted_calls(messages)
+    else:
+        messages = [
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": f"Objective: {user_goal}"}
+        ]
+
+    def _persist():
+        """Save the history after every appended message, so an interruption loses nothing recorded."""
+        if session_id is None:
+            return True
+        try:
+            session.save_session(
+                session_id, user_goal, messages,
+                objective=state.objective,
+                summary=state.summary,
+                execution=journal.to_dicts(),
+            )
+            return True
+        except OSError as e:
+            print(f"⚠️  Could not save session {session_id}: {e}. Durability is unknown; execution will stop without retrying.")
+            return False
+
+    if not _persist():
+        return
 
     # Merge local and MCP tools
     all_tools = get_all_tools(mcp_client)
@@ -112,9 +256,18 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
         current_tokens = sum(get_token_count(msg.get('content', '') or json.dumps(msg)) for msg in messages)
 
         if current_tokens > (config.MAX_TOKENS * config.COMPACT_THRESHOLD):
-            after_tokens = sum(get_token_count(msg.get('content', '') or json.dumps(msg)) for msg in (messages[:1] + messages[-4:]))
+            # Summarize the middle of the history; compact_messages falls back to hard truncation on failure
+            try:
+                messages = await compaction.compact_messages(
+                    messages, event_loop, mcp_client, state=state
+                )
+                if not _persist():
+                    return
+            except compaction.CannotCompactError as e:
+                print(f"\n❌ {e} Stopping: the run cannot continue within the context budget.")
+                break
+            after_tokens = sum(get_token_count(msg.get('content', '') or json.dumps(msg)) for msg in messages)
             render.print_compaction_notice(current_tokens, after_tokens)
-            messages = messages[:1] + messages[-4:]
 
         # 1. Query LM Studio
         payload = {
@@ -228,12 +381,32 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
         finish_reason = choice.get("finish_reason")
         message = choice.get("message", {})
 
+        if message.get("tool_calls"):
+            valid_calls, call_error = _validate_tool_call_batch(message["tool_calls"], journal)
+            if not valid_calls:
+                render.print_llm_error(call_error)
+                break
+
         # Print assistant's response
         if message.get("content"):
             render.print_assistant_message(message['content'])
 
         # Append assistant message to history
-        messages.append({"role": "assistant", "content": message.get("content", "")})
+        assistant_msg = {"role": "assistant", "content": message.get("content", "")}
+        if message.get("tool_calls"):
+            # Keep the declarations so tool results can be paired with them (OpenAI protocol)
+            assistant_msg["tool_calls"] = [_declare_tool_call(tc) for tc in message["tool_calls"]]
+        messages.append(assistant_msg)
+        if message.get("tool_calls"):
+            for declared_call in assistant_msg["tool_calls"]:
+                function = declared_call.get("function", {})
+                journal.register(
+                    declared_call.get("id"),
+                    function.get("name") or "",
+                    function.get("arguments", "{}"),
+                )
+        if not _persist():
+            return
 
         # 2. Check for completion
         if finish_reason == "stop":
@@ -244,26 +417,51 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
         if finish_reason == "tool_calls" and message.get("tool_calls"):
             tool_calls = message.get("tool_calls", [])
 
-            for tool_call in tool_calls:
+            for tool_index, tool_call in enumerate(tool_calls):
                 tool_id = tool_call.get("id")
                 tool_name = tool_call.get("function", {}).get("name")
 
                 # Parse tool arguments
+                parse_error = None
                 try:
                     arguments_str = tool_call.get("function", {}).get("arguments", "{}")
                     tool_input = json.loads(arguments_str)
                 except json.JSONDecodeError as e:
-                    tool_input = {}
-                    observation = envelope.error_validation(
+                    tool_input = None
+                    parse_error = envelope.error_validation(
                         f"Error: Malformed tool arguments: {str(e)}",
                         fixable=False
                     )
+                if parse_error is None and not isinstance(tool_input, dict):
+                    # Valid JSON that is not an object (null, [], 1, "x") cannot be tool arguments
+                    tool_input = None
+                    parse_error = envelope.error_validation(
+                        "Error: Tool arguments must be a JSON object", fixable=False)
+
+                # Invalid or nameless calls are answered with an error and never dispatched
+                if parse_error is not None or not tool_name:
+                    observation = parse_error or envelope.error_validation(
+                        "Error: Tool call has no function name", fixable=False)
+                    observation_str = _serialize_observation(observation)
+                    render.print_observation(observation_str)
+                    journal.transition(tool_id, execution.ToolCallStatus.FAILED, observation_str, "validation")
+                    messages.append({"role": "tool", "tool_call_id": tool_id, "content": observation_str})
+                    if not _persist():
+                        return
+                    continue
 
                 if tool_name and tool_input is not None:
                     observation_str = None  # Reset for this tool call iteration
                     render.print_tool_call(tool_name, tool_input)
 
-                    observation = dispatch.dispatch_tool(tool_name, tool_input, mcp_client, event_loop, allowed_tools=tool_allowlist_override)
+                    try:
+                        journal.transition(tool_id, execution.ToolCallStatus.RUNNING)
+                    except execution.ExecutionStateError:
+                        raise
+                    if not _persist():
+                        return
+
+                    observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override)
 
                     # --- HANDLE PERMISSION REQUEST ---
                     if isinstance(observation, dict) and observation.get("requiresPermission"):
@@ -287,7 +485,7 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
                                 if kind == "shell_command":
                                     from .tools.shell import mark_shell_command_approved
                                     mark_shell_command_approved(observation.get("command", ""))
-                                observation = dispatch.dispatch_tool(tool_name, tool_input, mcp_client, event_loop, allowed_tools=tool_allowlist_override)
+                                observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override)
                             # Convert envelope dict to JSON string for the model
                             if isinstance(observation, dict) and "isError" in observation:
                                 observation_str = envelope.serialize_for_model(observation)
@@ -306,7 +504,7 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
                                 mark_shell_command_approved(observation.get("command", ""))
 
                             # Re-execute now that it's in the allowed list
-                            observation = dispatch.dispatch_tool(tool_name, tool_input, mcp_client, event_loop, allowed_tools=tool_allowlist_override)
+                            observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override)
                             # Convert envelope dict to JSON string for the model
                             if isinstance(observation, dict) and "isError" in observation:
                                 observation_str = envelope.serialize_for_model(observation)
@@ -329,17 +527,45 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
 
                     # --- GUARDRAIL: No Progress Detection ---
                     current_tool_call = (tool_name, str(tool_input), observation_str[:100])
-                    if current_tool_call == previous_tool_call:
-                        render.print_guardrail_stop()
-                        break
+                    is_repeat = current_tool_call == previous_tool_call
                     previous_tool_call = current_tool_call
 
-                    # Append tool result to messages
+                    # Append tool result to messages (every dispatched call gets one)
                     messages.append({
                         "role": "tool",
                         "tool_call_id": tool_id,
                         "content": observation_str
                     })
+                    if isinstance(observation, dict) and observation.get("isError"):
+                        category = observation.get("errorCategory")
+                        terminal_status = (
+                            execution.ToolCallStatus.UNKNOWN
+                            if category in ("unknown_outcome", "transient")
+                            else execution.ToolCallStatus.FAILED
+                        )
+                        journal.transition(tool_id, terminal_status, observation_str, category)
+                    else:
+                        journal.transition(tool_id, execution.ToolCallStatus.COMPLETED, observation_str)
+                    if not _persist():
+                        return
+
+                    if is_repeat:
+                        render.print_guardrail_stop()
+                        # Declared calls that will not run still need a result to keep the group valid
+                        for skipped in tool_calls[tool_index + 1:]:
+                            messages.append({
+                                "role": "tool",
+                                "tool_call_id": skipped.get("id"),
+                                "content": execution.SKIPPED_RESULT
+                            })
+                            journal.transition(
+                                skipped.get("id"), execution.ToolCallStatus.FAILED,
+                                execution.SKIPPED_RESULT,
+                                "guardrail",
+                            )
+                        if not _persist():
+                            return
+                        break
 
         elif finish_reason != "stop":
             render.print_finish_reason_warning(finish_reason)
@@ -348,7 +574,10 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
         render.print_max_iterations_reached()
 
 
-def agent_loop(user_goal: str, system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None) -> None:
+def agent_loop(user_goal: str, system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
+               session_id: Optional[str] = None, resume_messages: Optional[list] = None,
+               resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
+               resume_execution: Optional[list] = None) -> None:
     """Synchronous entry point that sets up async context.
 
     Args:
@@ -382,7 +611,12 @@ def agent_loop(user_goal: str, system_prompt_override: Optional[str] = None, too
         event_loop.run_until_complete(mcp_client.connect_all(mcp_config))
 
         # Run the agent loop
-        event_loop.run_until_complete(agent_loop_async(user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override))
+        event_loop.run_until_complete(agent_loop_async(user_goal, mcp_client, event_loop, system_prompt_override,
+                                                       tool_allowlist_override, session_id=session_id,
+                                                       resume_messages=resume_messages,
+                                                       resume_objective=resume_objective,
+                                                       resume_summary=resume_summary,
+                                                       resume_execution=resume_execution))
 
     finally:
         # Close MCP connections

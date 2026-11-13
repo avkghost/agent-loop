@@ -8,7 +8,8 @@ from pathlib import Path
 
 from . import config, loop
 from .config_loader import load_config, apply_config_overrides
-from .session import list_sessions, load_session
+from .session import SESSION_FORMAT, SessionLoadError, SessionValidationError, list_sessions, load_session, validate_session_data
+from .execution import ExecutionJournal
 from .tools.mcp_client import MCPClientManager
 from .agents_loader import load_agents, get_agent_description
 from .skills_loader import load_skills
@@ -113,7 +114,7 @@ def main(args=None):
             return
         goal = parsed.goal
         session_id = str(uuid.uuid4())
-        loop.agent_loop(goal)
+        loop.agent_loop(goal, session_id=session_id)
 
     elif command == "repl":
         # Interactive REPL with persistent MCP connections
@@ -146,7 +147,7 @@ def main(args=None):
                         continue
 
                     session_id = str(uuid.uuid4())
-                    loop.agent_loop(goal)
+                    loop.agent_loop(goal, session_id=session_id)
                 except KeyboardInterrupt:
                     print("\n\nExiting...")
                     break
@@ -155,14 +156,47 @@ def main(args=None):
             event_loop.close()
 
     elif command == "resume":
-        session_data = load_session(parsed.session_id)
+        try:
+            session_data = load_session(parsed.session_id)
+        except SessionLoadError as e:
+            print(f"❌ Cannot load session ({e.category}): {e}")
+            return
         if not session_data:
             print(f"❌ Session not found: {parsed.session_id}")
             return
 
+        messages = session_data.get("messages", [])
+        try:
+            session_kind = validate_session_data(session_data)
+        except SessionValidationError as e:
+            print(f"❌ Cannot resume session: {e}")
+            return
+
+        resume_kwargs = {}
+        if session_kind in ("structured", "structured_legacy"):
+            objective = session_data.get("objective")
+            summary = session_data.get("summary")
+            execution = session_data.get("execution", [])
+            resume_kwargs = {
+                "resume_objective": objective,
+                "resume_summary": summary,
+                "resume_execution": execution,
+            }
+        else:
+            legacy_objective = next(
+                (m.get("content") for m in messages if m.get("role") == "user"),
+                None,
+            )
+            if isinstance(legacy_objective, str):
+                resume_kwargs = {"resume_objective": legacy_objective}
+
         print(f"📂 Resuming session: {session_data.get('goal', 'Unknown goal')}")
-        # TODO: Implement resume logic (reconstruct messages and continue loop)
-        print("⚠️ Resume not yet implemented")
+        loop.agent_loop(
+            session_data.get("goal", ""),
+            session_id=parsed.session_id,
+            resume_messages=messages,
+            **resume_kwargs,
+        )
 
     elif command == "sessions":
         sessions = list_sessions()

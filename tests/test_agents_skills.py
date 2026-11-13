@@ -162,8 +162,9 @@ class TestAllowedToolsEnforcement:
         assert result.get("errorCategory") == "permission"
         assert "not permitted" in result.get("content", "")
 
-    def test_empty_allowlist_means_unrestricted(self):
+    def test_empty_allowlist_means_unrestricted(self, tmp_path, monkeypatch):
         """Test that empty allowlist means no restriction."""
+        monkeypatch.chdir(tmp_path)  # the write must land in a temp directory, not the repo
         # Empty list = no restriction
         result = dispatch.dispatch_tool(
             "write_file",
@@ -173,8 +174,9 @@ class TestAllowedToolsEnforcement:
         # Should not have permission error
         assert result.get("errorCategory") != "permission"
 
-    def test_none_allowlist_means_unrestricted(self):
+    def test_none_allowlist_means_unrestricted(self, tmp_path, monkeypatch):
         """Test that None allowlist means no restriction."""
+        monkeypatch.chdir(tmp_path)  # the write must land in a temp directory, not the repo
         # None = no restriction
         result = dispatch.dispatch_tool(
             "write_file",
