@@ -7,7 +7,7 @@ Tool dispatch is patched, so no shell command or file write runs.
 import sys
 import json
 import asyncio
-from unittest.mock import patch, MagicMock
+from unittest.mock import patch, MagicMock, AsyncMock
 from pathlib import Path
 
 # Add parent directory to path for imports
@@ -113,7 +113,7 @@ class TestIntegrationAgentLoop:
         payload = mock_post.call_args[1]["json"]
         assert "messages" in payload and "tools" in payload
 
-    @patch('src.dispatch.dispatch_tool', return_value="ls output")
+    @patch('src.dispatch.dispatch_tool_async', new_callable=AsyncMock, return_value="ls output")
     @patch('src.loop.requests.post')
     def test_tool_call_sequence(self, mock_post, mock_dispatch):
         """A tool call is dispatched once, its result is sent back, and the run completes."""
@@ -136,7 +136,7 @@ class TestIntegrationAgentLoop:
         assert [m["tool_call_id"] for m in results] == ["call_1"]
         assert not protocol_violations(second)
 
-    @patch('src.dispatch.dispatch_tool', return_value="file written")
+    @patch('src.dispatch.dispatch_tool_async', new_callable=AsyncMock, return_value="file written")
     @patch('src.loop.requests.post')
     def test_write_file_with_search_warning(self, mock_post, mock_dispatch):
         """A write_file call is dispatched with its arguments, then the run completes."""
@@ -156,7 +156,7 @@ class TestIntegrationAgentLoop:
         assert mock_dispatch.call_args[0][1] == {"path": "new_file.txt", "content": "Hello, world!"}
         assert mock_post.call_count == 2
 
-    @patch('src.dispatch.dispatch_tool', side_effect=lambda *a, **k: "x" * 4000)
+    @patch('src.dispatch.dispatch_tool_async', new_callable=AsyncMock, side_effect=lambda *a, **k: "x" * 4000)
     @patch('src.loop.requests.post')
     def test_context_compaction(self, mock_post, mock_dispatch):
         """Forced compaction: the summarizer is attempted, falls back to truncation, and every
@@ -198,7 +198,7 @@ class TestIntegrationAgentLoop:
 
         assert mock_post.call_count == 1
 
-    @patch('src.dispatch.dispatch_tool', return_value="ok")
+    @patch('src.dispatch.dispatch_tool_async', new_callable=AsyncMock, return_value="ok")
     @patch('src.loop.requests.post')
     def test_max_iterations_limit(self, mock_post, mock_dispatch):
         """The run makes exactly MAX_ITERATIONS requests when every reply asks for a tool."""

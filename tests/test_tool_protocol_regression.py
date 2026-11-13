@@ -97,32 +97,20 @@ def test_internal_dispatch_error_is_not_misreported_as_unknown_side_effect(run_l
         run_loop([first], dispatch_fn=dispatch)
 
 
-def test_background_shell_reports_started_not_completed(monkeypatch):
-    # Pin the allowlist: test_integration.py overwrites config.ALLOWED_TOOLS globally.
-    monkeypatch.setattr(config, "ALLOWED_TOOLS", {"echo"})
-    fake_process = SimpleNamespace(pid=1234)
-    fake_subprocess = SimpleNamespace(
-        PIPE=object(),
-        DEVNULL=object(),
-        Popen=lambda *args, **kwargs: fake_process,
-        run=lambda *args, **kwargs: pytest.fail("foreground execution was unexpected"),
-    )
-    monkeypatch.setattr(shell, "subprocess", fake_subprocess)
+def test_background_shell_is_rejected_before_any_process_starts(monkeypatch):
+    """A trailing '&' would start an unmanaged process, so it is rejected before approval or spawn."""
+    import asyncio
 
+    async def must_not_spawn(*args, **kwargs):
+        raise AssertionError("a background command must not spawn a process")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", must_not_spawn)
+    monkeypatch.setattr(asyncio, "create_subprocess_shell", must_not_spawn)
     result = shell.execute_command("echo work &")
 
-    assert result["isError"] is False
-    assert "Background process started" in result["content"]
-    assert "completed" not in result["content"].lower()
-    assert "jobs" not in result["content"]
-    assert "kill" not in result["content"]
-
-
-def test_prompt_does_not_advertise_shared_shell_job_control():
-    from src import prompts
-
-    assert "jobs`" not in prompts.SYSTEM_PROMPT
-    assert "kill %1" not in prompts.SYSTEM_PROMPT
+    assert result["isError"] is True
+    assert result["errorCategory"] == "validation"
+    assert "Unmanaged background execution is not supported" in result["content"]
 
 
 def test_compaction_runs_only_after_the_tool_result_is_recorded(monkeypatch, run_loop, streamed_response):

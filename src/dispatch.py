@@ -10,6 +10,16 @@ from .tools import shell, files
 from .tools.mcp_client import MCPClientManager
 
 
+def _allowed_tools_denial(tool_name: str, allowed_tools: Optional[list]) -> Optional[Dict[str, Any]]:
+    """Two-layer defense in depth: skills may restrict which tools they can call."""
+    if allowed_tools and isinstance(allowed_tools, list) and len(allowed_tools) > 0:
+        if tool_name not in allowed_tools:
+            return envelope.error_permission(
+                f"Tool '{tool_name}' is not permitted for this skill (allowed: {', '.join(allowed_tools)})"
+            )
+    return None
+
+
 def _mcp_gate(tool_name: str, tool_input: Dict[str, Any], mcp_client: Optional[MCPClientManager]):
     """Checks shared by both dispatch entry points. Returns a result to send back, or None to proceed."""
     if not mcp_client:
@@ -35,14 +45,25 @@ async def dispatch_tool_async(tool_name: str, tool_input: Dict[str, Any], mcp_cl
     MCP calls are awaited directly on the current event loop, so the transport is reached
     without nesting run_until_complete. Local tools run synchronously, exactly as in dispatch_tool.
     """
+    if tool_name == "run_command":
+        # Awaited directly so a running command never blocks the agent's event loop
+        denial = _allowed_tools_denial(tool_name, allowed_tools)
+        if denial:
+            return denial
+        command = tool_input.get("command", "")
+        if not command:
+            return envelope.error_validation(
+                "Error: run_command requires a 'command' argument",
+                fixable=False
+            )
+        return await shell.execute_command_async(command, tool_input.get("timeout_seconds"))
+
     if not (isinstance(tool_name, str) and tool_name.startswith("mcp_")):
         return dispatch_tool(tool_name, tool_input, mcp_client, event_loop, allowed_tools=allowed_tools)
 
-    if allowed_tools and isinstance(allowed_tools, list) and len(allowed_tools) > 0:
-        if tool_name not in allowed_tools:
-            return envelope.error_permission(
-                f"Tool '{tool_name}' is not permitted for this skill (allowed: {', '.join(allowed_tools)})"
-            )
+    denial = _allowed_tools_denial(tool_name, allowed_tools)
+    if denial:
+        return denial
     gate = _mcp_gate(tool_name, tool_input, mcp_client)
     if gate is not None:
         return gate
@@ -61,12 +82,9 @@ def dispatch_tool(tool_name: str, tool_input: Dict[str, Any], mcp_client: Option
         allowed_tools: Optional list of allowed tool names. None or empty list means no restriction.
     """
 
-    # Check allowed-tools enforcement (two-layer defense in depth)
-    if allowed_tools and isinstance(allowed_tools, list) and len(allowed_tools) > 0:
-        if tool_name not in allowed_tools:
-            return envelope.error_permission(
-                f"Tool '{tool_name}' is not permitted for this skill (allowed: {', '.join(allowed_tools)})"
-            )
+    denial = _allowed_tools_denial(tool_name, allowed_tools)
+    if denial:
+        return denial
 
     # Handle local tools
     if tool_name == "run_command":
@@ -77,7 +95,7 @@ def dispatch_tool(tool_name: str, tool_input: Dict[str, Any], mcp_client: Option
                 fixable=False
             )
 
-        result = shell.execute_command(command)
+        result = shell.execute_command(command, tool_input.get("timeout_seconds"))
 
         # Check for permission request sentinel
         if isinstance(result, dict) and result.get("requiresPermission"):

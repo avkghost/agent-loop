@@ -27,7 +27,7 @@ REQUEST_MAX_TOKENS = 8192  # Per-request output limit (increased for 131K contex
 ALLOWED_TOOLS = {
     "grep", "wget", "curl", "rg", "cat", "echo", "ls",
     "mkdir", "rm", "mv", "cp", "find", "python", "python3", "gcc", "npm", "ping", "nslookup",
-    "timeout", "kill", "jobs", "bg", "fg"  # Shell process control
+    "timeout"
 }
 ALLOWED_MCP_TOOLS = set()  # Dynamically populated; starts empty (no implicit trust)
 

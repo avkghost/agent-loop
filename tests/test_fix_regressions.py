@@ -65,56 +65,39 @@ def test_mcp_connection_loss_is_unknown_outcome_and_not_retryable(monkeypatch):
     assert "may have executed" in result["content"]
 
 
-import subprocess as _real_subprocess
-
-from src import envelope
 from src.tools import shell
 
 
-def _shell_with(monkeypatch, run_behaviour):
-    def run(*args, **kwargs):
-        return run_behaviour(*args, **kwargs)
-
-    fake = SimpleNamespace(run=run, Popen=lambda *a, **k: pytest.fail("no background process expected"),
-                           PIPE=-1, DEVNULL=-3, TimeoutExpired=_real_subprocess.TimeoutExpired)
-    monkeypatch.setattr(shell, "subprocess", fake)
-    monkeypatch.setattr(config, "ALLOWED_TOOLS", {"echo"})
-    monkeypatch.setattr(config, "ALLOW_ALL", False)
-
-
-def test_shell_timeout_is_unknown_outcome_and_not_retryable(monkeypatch):
-    def timeout(*a, **k):
-        raise _real_subprocess.TimeoutExpired(cmd="echo hi", timeout=120)
-
-    _shell_with(monkeypatch, timeout)
-    result = asyncio.run(loop._dispatch_safely("run_command", {"command": "echo hi"}, None, None, None))
-
-    assert result["errorCategory"] == "unknown_outcome"
-    assert result["isRetryable"] is False
-    assert "120 seconds" in result["content"]
-    assert "15 seconds" not in result["content"]
-
-
-def test_shell_unexpected_failure_after_launch_is_unknown_outcome(monkeypatch):
-    def broken(*a, **k):
-        raise RuntimeError("pipe broke mid-run")
-
-    _shell_with(monkeypatch, broken)
-    with pytest.raises(envelope.ToolExecutionError, match="pipe broke mid-run"):
-        dispatch.dispatch_tool("run_command", {"command": "echo hi"}, None, None)
-
-
 def test_shell_missing_program_is_a_non_retryable_validation_error(monkeypatch):
-    def missing(*a, **k):
+    def missing(*args, **kwargs):
         raise FileNotFoundError(2, "No such file or directory", "echo")
 
-    _shell_with(monkeypatch, missing)
-    result = dispatch.dispatch_tool("run_command", {"command": "echo hi"}, None, None)
+    monkeypatch.setattr(shell.subprocess, "Popen", missing)
+    monkeypatch.setattr(config, "ALLOWED_TOOLS", {"echo"})
+    monkeypatch.setattr(config, "ALLOW_ALL", False)
+    result = asyncio.run(shell.execute_command_async("echo hi"))
 
     assert result["isError"] is True
     assert result["errorCategory"] == "validation"
     assert result["isRetryable"] is False
     assert "could not start command" in result["content"]
+
+
+def test_shell_spawn_exception_is_unknown_outcome_not_a_validation_error(monkeypatch):
+    def broken(*args, **kwargs):
+        raise RuntimeError("unexpected spawn failure")
+
+    monkeypatch.setattr(shell.subprocess, "Popen", broken)
+    monkeypatch.setattr(config, "ALLOWED_TOOLS", {"echo"})
+    monkeypatch.setattr(config, "ALLOW_ALL", False)
+    event_loop = asyncio.new_event_loop()
+    try:
+        result = event_loop.run_until_complete(loop._dispatch_safely("run_command", {"command": "echo hi"}, None, event_loop, None))
+    finally:
+        event_loop.close()
+
+    assert result["errorCategory"] == "unknown_outcome"
+    assert result["isRetryable"] is False
 
 
 def test_objective_is_kept_verbatim_through_repeated_compaction(monkeypatch):

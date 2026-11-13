@@ -44,6 +44,9 @@ def _run(monkeypatch, responses, dispatch_fn, *, summarizer_fails=False, session
     monkeypatch.setattr(loop.requests, "post", post)
     monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
     monkeypatch.setattr(dispatch, "dispatch_tool", dispatch_fn)
+    async def _dispatch_async(tool_name, tool_input, mcp_client=None, event_loop=None, allowed_tools=None):
+        return dispatch_fn(tool_name, tool_input)
+    monkeypatch.setattr(dispatch, "dispatch_tool_async", _dispatch_async)
     ev = asyncio.new_event_loop()
     try:
         ev.run_until_complete(loop.agent_loop_async(

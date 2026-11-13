@@ -32,21 +32,20 @@ Your components are:
 
 You have access to local tools (run_command, write_file) and may have additional MCP-sourced tools discovered at startup, depending on the mcp_servers.json configuration.
 
-**run_command(command)**: Execute shell commands with full shell feature support (pipes, redirects, operators).
+**run_command(command, timeout_seconds?)**: Run a foreground shell command and return its output.
 
-✅ WORKS: `grep -r "pattern" .`, `python3 script.py`, `find . -name "*.py" | head -5`, `echo text > file.txt`, `cmd1 && cmd2`, `timeout 30 long_command`
+✅ WORKS: `grep -r "pattern" .`, `python3 script.py`, `find . -name "*.py" | head -5` (after approval)
 ❌ BLOCKED (need approval): Shell operators (`|`, `>`, `&&`, `||`) on first use require permission. Approve once and they work for the session.
+❌ REJECTED: background execution (a trailing or embedded `&`), and detaching commands such as `nohup`, `setsid`, `disown`, `screen`, `tmux`.
 
-**Timeout Control for Long-Running Tasks:**
-- Default timeout: 120 seconds (2 minutes)
-- Use shell `timeout` command for custom timeouts: `timeout 60 command` (runs command, kills after 60s)
-- Background start: a command ending in `&` starts the process and returns its PID immediately. Only the start is confirmed: completion is not tracked and the output is discarded unless the command redirects it to a file.
-- Agent Loop does not provide a shared job list or job-control state for background processes. Use an external process manager if lifecycle control is required.
+**Timeouts and long tasks:**
+- Default timeout: 120 seconds. Pass `timeout_seconds` up to 600 for longer foreground work.
+- A timed-out command is stopped and may have partly run. Do not assume it had no effect, and do not rerun it blindly.
+- Background servers and watchers are not available. Agent Loop has no job list or job control.
 
 **Examples:**
-- Long compilation with custom timeout: `timeout 180 make build`
-- Run server in background: `timeout 600 python3 server.py > server.log 2>&1 &`
-- Pipeline with timeout: `timeout 60 find . -name "*.py" | head -10`
+- Long compilation: `make build` with `timeout_seconds` 300
+- Pipeline (after approval): `find . -name "*.py" | head -10`
 
 Some commands may require human approval and can be denied — treat a "Command denied by user." result as a signal to adapt your plan. Shell operators require one-time approval per session.
 

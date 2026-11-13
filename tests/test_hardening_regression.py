@@ -72,6 +72,9 @@ def _drive(monkeypatch, responses, dispatch_fn, *, summarizer=None, session_id=N
     monkeypatch.setattr(loop.requests, "post", post)
     monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
     monkeypatch.setattr(dispatch, "dispatch_tool", dispatch_fn)
+    async def _dispatch_async(tool_name, tool_input, mcp_client=None, event_loop=None, allowed_tools=None):
+        return dispatch_fn(tool_name, tool_input)
+    monkeypatch.setattr(dispatch, "dispatch_tool_async", _dispatch_async)
     for name, value in config_overrides.items():
         monkeypatch.setattr(config, name, value)
 
@@ -93,86 +96,10 @@ def _tool_messages(messages):
 # A. Background execution contract
 # ---------------------------------------------------------------------------
 
-class _FakeSubprocess:
-    PIPE = -1
-    DEVNULL = -3
-    TimeoutExpired = Exception
-
-    def __init__(self, pid=4321):
-        self.popen_calls = []
-        self.process = SimpleNamespace(pid=pid, wait=self._no_wait, communicate=self._no_wait)
-        self.waited = 0
-
-    def _no_wait(self, *args, **kwargs):
-        self.waited += 1
-        raise AssertionError("background execution must not wait for the process")
-
-    def Popen(self, args, **kwargs):
-        self.popen_calls.append((args, kwargs))
-        return self.process
-
-    def run(self, *args, **kwargs):
-        raise AssertionError("foreground run must not be used for a background command")
-
-
-@pytest.fixture
-def fake_subprocess(monkeypatch):
-    fake = _FakeSubprocess()
-    monkeypatch.setattr(shell, "subprocess", fake)
-    monkeypatch.setattr(config, "ALLOWED_TOOLS", {"echo", "sleep"})
-    monkeypatch.setattr(config, "ALLOW_ALL", False)
-    return fake
-
-
-def test_background_start_is_acknowledged_as_start_only(fake_subprocess):
-    result = shell.execute_command("echo work &")
-
-    assert result["isError"] is False
-    assert "Background process started - PID: 4321" in result["content"]
-    assert "Started only" in result["content"]
-    assert "completion is not tracked" in result["content"]
-    assert "completed" not in result["content"].lower()
-    assert fake_subprocess.waited == 0
-
-
-def test_background_trailing_ampersand_is_not_passed_to_the_program(fake_subprocess):
-    shell.execute_command("sleep 30 &")
-
-    args, kwargs = fake_subprocess.popen_calls[0]
-    assert args == ["sleep", "30"]
-    assert kwargs["shell"] is False
-
-
-def test_background_output_is_discarded_so_a_full_pipe_cannot_block_the_process(fake_subprocess):
-    shell.execute_command("echo work &")
-
-    _, kwargs = fake_subprocess.popen_calls[0]
-    assert kwargs["stdout"] == _FakeSubprocess.DEVNULL
-    assert kwargs["stderr"] == _FakeSubprocess.DEVNULL
-
-
-def test_background_command_with_shell_operators_keeps_shell_mode(monkeypatch, fake_subprocess):
-    monkeypatch.setattr(config, "ALLOW_ALL", True)
-
-    shell.execute_command("echo a | cat &")
-
-    args, kwargs = fake_subprocess.popen_calls[0]
-    assert args == "echo a | cat"
-    assert kwargs["shell"] is True
-
-
-def test_background_result_advertises_no_job_control(fake_subprocess):
-    content = shell.execute_command("echo work &")["content"]
-
-    assert not re.search(r"\bjobs\b", content)
-    assert "%1" not in content
-    assert "kill" not in content  # the runtime gives no lifecycle-control instruction
-
-
 def test_agent_prompt_advertises_no_unsupported_job_control():
     assert not re.search(r"\bjobs\b", prompts.SYSTEM_PROMPT)
     assert "kill %1" not in prompts.SYSTEM_PROMPT
-    assert "does not provide a shared job list" in prompts.SYSTEM_PROMPT
+    assert "has no job list or job control" in prompts.SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

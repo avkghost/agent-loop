@@ -9,10 +9,11 @@ def get_local_tools() -> list:
                 "name": "run_command",
                 "description": """Execute a shell command from the allowlist.
 
-Purpose: Run allowlisted shell commands (grep, rg, find, python3, npm, etc.) without shell interpretation.
+Purpose: Run allowlisted shell commands in the foreground and return their output.
 
 Inputs:
-- command (string): The exact command to run. Arguments are passed literally via shlex.split, so no pipes, redirection, or globbing via shell — e.g., "grep -r 'pattern' ." or "python3 script.py".
+- command (string): The command to run. Plain commands are split with shlex and run without a shell. Commands containing shell operators (|, >, >>, <, &&, ||) run through /bin/sh only after the user approves them once per session.
+- timeout_seconds (integer, optional): Maximum runtime, 1 to 600. Default 120. On timeout the command's process group is stopped; partial effects are possible and the command is not retried.
 
 Examples:
 - Search codebase: run_command with "grep -r 'function_name' ."
@@ -20,17 +21,24 @@ Examples:
 - List files: run_command with "find . -name '*.py' -type f"
 
 Edge cases & limitations:
-- No shell builtins (cd, echo with redirection, etc.) — these are passed to the subprocess literally and fail.
-- Timeout: commands exceeding 15 seconds are terminated.
+- Plain commands have no shell builtins (cd, export, etc.) — those fail.
+- stdin is empty (/dev/null). Interactive commands cannot read input.
+- Output is captured up to 1 MiB per stream; only the first and last 16 KiB of each stream are returned, with a truncation note.
 - Some commands may require human approval (1/2/3 escalation). If denied, adapt your plan.
 
-Boundaries: DO NOT use this to write files. Redirection like "echo text > file.txt" does not work — the > is passed as a literal argument, not interpreted by shell. Use write_file instead. DO NOT use this to run interactive commands that expect stdin.""",
+Boundaries: DO NOT use a trailing or embedded '&'. Background execution is not supported and is rejected. Commands such as nohup, setsid, disown, screen, tmux, at, and batch are also rejected. Use write_file to write files.""",
                 "parameters": {
                     "type": "object",
                     "properties": {
                         "command": {
                             "type": "string",
                             "description": "The shell command to execute"
+                        },
+                        "timeout_seconds": {
+                            "type": "integer",
+                            "minimum": 1,
+                            "maximum": 600,
+                            "description": "Maximum runtime in seconds (default 120)"
                         }
                     },
                     "required": ["command"]

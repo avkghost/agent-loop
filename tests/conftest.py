@@ -88,6 +88,13 @@ def fake_post(monkeypatch):
     return install
 
 
+def _async_dispatch(sync_fn):
+    """Awaitable stand-in for dispatch_tool_async that routes every local tool to a sync fake."""
+    async def dispatch_async(tool_name, tool_input, mcp_client=None, event_loop=None, allowed_tools=None):
+        return sync_fn(tool_name, tool_input)
+    return dispatch_async
+
+
 @pytest.fixture
 def run_loop(monkeypatch):
     def run(
@@ -116,6 +123,7 @@ def run_loop(monkeypatch):
             return dispatch_fn(tool_name, tool_input, *args, **kwargs)
 
         monkeypatch.setattr(loop.dispatch, "dispatch_tool", recording_dispatch)
+        monkeypatch.setattr(loop.dispatch, "dispatch_tool_async", _async_dispatch(recording_dispatch))
         run.last_post = post
         run.last_calls = calls
         for name, value in config_overrides.items():
@@ -181,3 +189,7 @@ def protocol_violations(messages):
     if open_ids:
         problems.append(f"end: unanswered calls {open_ids}")
     return problems
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "real_process: runs harmless real subprocesses (see test_shell_hardening)")
