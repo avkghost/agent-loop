@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from pathlib import Path
 
-from . import config, loop
+from . import config, loop, jobs
 from .config_loader import load_config, apply_config_overrides
 from .session import SESSION_FORMAT, SessionLoadError, SessionValidationError, list_sessions, load_session, validate_session_data
 from .execution import ExecutionJournal
@@ -86,6 +86,14 @@ def parse_args(args=None):
 
 
 def main(args=None):
+    """Main CLI entry point. Managed jobs still running when the runtime exits are terminated."""
+    try:
+        return _main(args)
+    finally:
+        jobs.shutdown_runtime()
+
+
+def _main(args=None):
     """Main CLI entry point."""
     parsed = parse_args(args)
     command = parsed.command

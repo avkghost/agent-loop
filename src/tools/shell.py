@@ -285,7 +285,8 @@ async def _wait_group_empty(proc: subprocess.Popen, seconds: float) -> Optional[
         await asyncio.sleep(_POLL_SECONDS)
 
 
-async def _stop_group(proc: subprocess.Popen) -> bool:
+async def _stop_group(proc: subprocess.Popen, grace: Optional[float] = None,
+                      kill_confirm: Optional[float] = None) -> bool:
     """Stop the command's process group. True only when the group is confirmed empty.
 
     Signals are sent only while the leader's identity is held. A confirmed-empty group's zombie
@@ -294,12 +295,14 @@ async def _stop_group(proc: subprocess.Popen) -> bool:
     """
     if not _identity_held(proc):
         return False
+    grace = GRACE_SECONDS if grace is None else grace
+    kill_confirm = KILL_CONFIRM_SECONDS if kill_confirm is None else kill_confirm
     pgid = proc.pid
     _signal_group(pgid, signal.SIGTERM)
-    state = await _wait_group_empty(proc, GRACE_SECONDS)
+    state = await _wait_group_empty(proc, grace)
     if state is not True and _identity_held(proc):
         _signal_group(pgid, signal.SIGKILL)
-        state = await _wait_group_empty(proc, KILL_CONFIRM_SECONDS)
+        state = await _wait_group_empty(proc, kill_confirm)
     if state is True:
         proc.wait()  # an exited zombie: returns at once
         return True
@@ -559,15 +562,19 @@ async def _run(spawn: List[str], uses_shell: bool, timeout: int) -> Dict[str, An
     return await _complete(_terminate(proc, readers, transports, outcome, timeout))
 
 
-async def execute_command_async(command_str: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
-    """Run a foreground command without blocking the event loop."""
+def validate_command(command_str: str) -> Tuple[Optional[Dict[str, Any]], Optional[List[str]], bool]:
+    """Validation shared by foreground commands and managed jobs. Starts nothing.
+
+    Returns (early_result, spawn, uses_shell). early_result is a validation error or a permission
+    request to return unchanged; otherwise spawn is the Popen target (argv, or [shell_string]).
+    """
     global _APPROVED_SHELL_COMMANDS
 
     if os.name != "posix":
         return envelope.error_validation(
             "Error: shell execution requires a POSIX system (Linux or macOS).",
             fixable=False,
-        )
+        ), None, False
 
     command_str = (command_str or "").strip()
     if not command_str:
@@ -575,16 +582,11 @@ async def execute_command_async(command_str: str, timeout_seconds: Optional[int]
             "Error: Empty command.",
             fixable=False,
             description="A command must be provided."
-        )
-
-    timeout_error = _timeout_error(timeout_seconds)
-    if timeout_error:
-        return timeout_error
-    timeout = DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+        ), None, False
 
     rejected = _syntax_rejection(command_str)
     if rejected:
-        return rejected
+        return rejected, None, False
 
     # Check if command uses shell operators
     uses_shell = _has_shell_operators(command_str)
@@ -598,50 +600,67 @@ async def execute_command_async(command_str: str, timeout_seconds: Optional[int]
                 "identifier": "shell_operators",
                 "command": command_str,
                 "description": "This command uses shell operators (pipes |, redirects >, logical operators &&/||). Approval required."
-            }
+            }, None, False
         else:
             print(f"⚠️ ALLOW_ALL MODE: Executing shell command with operators")
             _APPROVED_SHELL_COMMANDS.add(command_str)
 
+    if uses_shell:
+        return None, [command_str], True
+
     # For non-shell commands, parse and check base command
-    if not uses_shell:
-        try:
-            tokens = shlex.split(command_str)
-        except ValueError as e:
-            return envelope.error_validation(
-                f"Error: Invalid command syntax (unbalanced quotes): {str(e)}",
-                fixable=True,
-                description="Check the command for unbalanced quotes or escaped characters."
-            )
+    try:
+        tokens = shlex.split(command_str)
+    except ValueError as e:
+        return envelope.error_validation(
+            f"Error: Invalid command syntax (unbalanced quotes): {str(e)}",
+            fixable=True,
+            description="Check the command for unbalanced quotes or escaped characters."
+        ), None, False
 
-        if not tokens:
-            return envelope.error_validation(
-                "Error: Empty command.",
-                fixable=False,
-                description="A command must be provided."
-            )
+    if not tokens:
+        return envelope.error_validation(
+            "Error: Empty command.",
+            fixable=False,
+            description="A command must be provided."
+        ), None, False
 
-        base_cmd = tokens[0]
+    base_cmd = tokens[0]
 
-        # Track if a codebase search command is being used
-        if base_cmd in config.SEARCH_COMMANDS:
-            config.HAS_SEARCHED_CODEBASE = True
+    # Track if a codebase search command is being used
+    if base_cmd in config.SEARCH_COMMANDS:
+        config.HAS_SEARCHED_CODEBASE = True
 
-        # Check if command is allowed
-        if base_cmd not in config.ALLOWED_TOOLS:
-            if config.ALLOW_ALL:
-                print(f"⚠️ ALLOW_ALL MODE: Executing unauthorized command: {base_cmd}")
-            else:
-                # Return permission request sentinel (not an error envelope)
-                return {
-                    "requiresPermission": True,
-                    "kind": "command",
-                    "identifier": base_cmd,
-                    "arguments": tokens[1:] if len(tokens) > 1 else []
-                }
-        return await _run(tokens, False, timeout)
+    # Check if command is allowed
+    if base_cmd not in config.ALLOWED_TOOLS:
+        if config.ALLOW_ALL:
+            print(f"⚠️ ALLOW_ALL MODE: Executing unauthorized command: {base_cmd}")
+        else:
+            # Return permission request sentinel (not an error envelope)
+            return {
+                "requiresPermission": True,
+                "kind": "command",
+                "identifier": base_cmd,
+                "arguments": tokens[1:] if len(tokens) > 1 else []
+            }, None, False
+    return None, tokens, False
 
-    return await _run([command_str], True, timeout)
+
+async def execute_command_async(command_str: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+    """Run a foreground command without blocking the event loop."""
+    if os.name != "posix" or not (command_str or "").strip():
+        early, _, _ = validate_command(command_str)
+        return early
+
+    timeout_error = _timeout_error(timeout_seconds)
+    if timeout_error:
+        return timeout_error
+    timeout = DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
+
+    early, spawn, uses_shell = validate_command(command_str)
+    if early is not None:
+        return early
+    return await _run(spawn, uses_shell, timeout)
 
 
 def execute_command(command_str: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:

@@ -96,10 +96,13 @@ def _tool_messages(messages):
 # A. Background execution contract
 # ---------------------------------------------------------------------------
 
-def test_agent_prompt_advertises_no_unsupported_job_control():
-    assert not re.search(r"\bjobs\b", prompts.SYSTEM_PROMPT)
+def test_agent_prompt_advertises_managed_jobs_and_no_shell_job_control():
+    # B2 changed this contract on purpose: managed jobs are advertised through their tools.
+    # Shell-level job control (the `jobs` builtin, `kill %1`) is still not offered.
+    assert "`jobs`" not in prompts.SYSTEM_PROMPT
     assert "kill %1" not in prompts.SYSTEM_PROMPT
-    assert "has no job list or job control" in prompts.SYSTEM_PROMPT
+    for tool in ("start_job", "status_job", "collect_job", "terminate_job"):
+        assert tool in prompts.SYSTEM_PROMPT
 
 
 # ---------------------------------------------------------------------------

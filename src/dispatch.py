@@ -7,6 +7,7 @@ from typing import Dict, Any, Optional
 from . import config, envelope
 from .envelope import ToolExecutionError  # re-exported: dispatch.ToolExecutionError
 from .tools import shell, files
+from . import jobs
 from .tools.mcp_client import MCPClientManager
 
 
@@ -57,6 +58,12 @@ async def dispatch_tool_async(tool_name: str, tool_input: Dict[str, Any], mcp_cl
                 fixable=False
             )
         return await shell.execute_command_async(command, tool_input.get("timeout_seconds"))
+
+    if tool_name in jobs.TOOL_NAMES:
+        denial = _allowed_tools_denial(tool_name, allowed_tools)
+        if denial:
+            return denial
+        return await jobs.call_tool(tool_name, tool_input)
 
     if not (isinstance(tool_name, str) and tool_name.startswith("mcp_")):
         return dispatch_tool(tool_name, tool_input, mcp_client, event_loop, allowed_tools=allowed_tools)
@@ -132,6 +139,9 @@ def dispatch_tool(tool_name: str, tool_input: Dict[str, Any], mcp_client: Option
         return files.write_file_safe(path, content)
 
     # Handle MCP tools
+    elif tool_name in jobs.TOOL_NAMES:
+        return jobs.call_tool_sync(tool_name, tool_input)
+
     elif tool_name.startswith("mcp_"):
         gate = _mcp_gate(tool_name, tool_input, mcp_client)
         if gate is not None:

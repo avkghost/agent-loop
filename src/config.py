@@ -31,6 +31,18 @@ ALLOWED_TOOLS = {
 }
 ALLOWED_MCP_TOOLS = set()  # Dynamically populated; starts empty (no implicit trust)
 
+# Managed background jobs (src/jobs.py)
+JOB_MAX_CONCURRENT = 4                 # running jobs at once; further start_job calls are refused
+JOB_DEFAULT_LIFETIME_SECONDS = 600     # watchdog deadline when start_job gives no lifetime_seconds
+JOB_MAX_LIFETIME_SECONDS = 3600        # largest lifetime_seconds a model may request
+JOB_OUTPUT_BUFFER_BYTES = 1 << 20      # per stream; oldest bytes are dropped and reported
+JOB_RETENTION_SECONDS = 600            # finished-job metadata is kept this long
+JOB_RETENTION_MAX = 32                 # and at most this many finished jobs are kept
+JOB_MAX_RETAINED = 8                   # unconfirmed stops kept for cleanup before new jobs are refused
+JOB_GRACE_SECONDS = 5.0                # SIGTERM -> SIGKILL window for a job stop
+JOB_KILL_CONFIRM_SECONDS = 5.0         # time to observe the group empty after SIGKILL
+JOB_SHUTDOWN_TIMEOUT_SECONDS = 30      # runtime shutdown budget for stopping all jobs
+
 # CLI flags
 ALLOW_ALL = False  # Set by main.py based on --allow flag
 

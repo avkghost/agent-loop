@@ -2,11 +2,12 @@
 
 import asyncio
 import json
+import uuid
 import requests
 from pathlib import Path
 from typing import Optional
 
-from . import config, envelope, prompts, dispatch, render, compaction, session, execution
+from . import config, envelope, prompts, dispatch, render, compaction, session, execution, jobs
 from .tools import get_all_tools
 from .tools.mcp_client import MCPClientManager
 
@@ -168,6 +169,26 @@ def _recover_execution_messages(messages, journal):
 
 
 async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_loop: asyncio.AbstractEventLoop,
+                            system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
+                            session_id: Optional[str] = None, resume_messages: Optional[list] = None,
+                            resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
+                            resume_execution: Optional[list] = None) -> None:
+    """Run one agent session. Managed jobs started here belong to this session and are terminated when it ends."""
+    owner = session_id or f"run-{uuid.uuid4().hex}"
+    token = jobs.bind_owner(owner)
+    try:
+        await _agent_loop_run(user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override,
+                              session_id=session_id, resume_messages=resume_messages,
+                              resume_objective=resume_objective, resume_summary=resume_summary,
+                              resume_execution=resume_execution)
+    finally:
+        try:
+            await jobs.end_session(owner)
+        finally:
+            jobs.unbind_owner(token)
+
+
+async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_loop: asyncio.AbstractEventLoop,
                             system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
                             session_id: Optional[str] = None, resume_messages: Optional[list] = None,
                             resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,

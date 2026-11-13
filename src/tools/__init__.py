@@ -1,8 +1,102 @@
 """Tool definitions and schemas."""
 
+def get_job_tools() -> list:
+    """Schemas for managed background jobs. Inputs are validated by src/jobs.py."""
+    return [
+        {
+            "type": "function",
+            "function": {
+                "name": "start_job",
+                "description": """Start a long-running local command as a managed background job and return its job_id.
+
+Purpose: Run a process that must keep going while you do other work (a server, a watcher, a long build). The job runs until it exits, you call terminate_job, its time limit is reached, or this run ends.
+
+Inputs:
+- command (string): Same rules as run_command: allowlisted command, same approval for shell operators. Background '&', nohup, setsid, and similar detaching commands are still rejected.
+- lifetime_seconds (integer, optional): Watchdog limit, 1 to 3600. The job is terminated automatically when it is reached.
+
+Returns: JSON with job_id, state (starting, running, completed, failed, terminated, or unknown), and the limits that apply.
+
+Edge cases & limitations:
+- Jobs belong to this agent run only. Other runs cannot see or control them.
+- A job is not restarted automatically, and it does not survive a restart of this program.
+- Output is buffered (1 MiB per stream); use collect_job to read it.""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "command": {"type": "string", "description": "The command to run as a job"},
+                        "lifetime_seconds": {"type": "integer", "minimum": 1, "maximum": 3600,
+                                             "description": "Watchdog limit in seconds"},
+                    },
+                    "required": ["command"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "status_job",
+                "description": """Report a job's state, reason, exit status, and remaining lifetime.
+
+Inputs:
+- job_id (string): The id returned by start_job.
+
+Returns: JSON. A job in state unknown may still be running; see its reason before relying on it.""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string"}},
+                    "required": ["job_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "collect_job",
+                "description": """Read a job's output incrementally.
+
+Inputs:
+- job_id (string): The id returned by start_job.
+- cursor (string, optional): The cursor from the previous collect_job call. Omit it on the first call.
+
+Returns: JSON with stdout and stderr (at most 16 KiB per stream per call), a new cursor, and flags. stdout_dropped_bytes or stderr_dropped_bytes greater than zero means earlier output was dropped from the buffer. more is true when unread output remains; call again with the new cursor.""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "job_id": {"type": "string"},
+                        "cursor": {"type": "string"},
+                    },
+                    "required": ["job_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "terminate_job",
+                "description": """Stop a running job: SIGTERM to its process group, then SIGKILL after a bounded grace period.
+
+Inputs:
+- job_id (string): The id returned by start_job.
+
+Returns: JSON with the resulting state. terminated means the process group was confirmed empty. unknown means termination could not be confirmed; its processes may still be running.""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {"job_id": {"type": "string"}},
+                    "required": ["job_id"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    ]
+
+
 def get_local_tools() -> list:
     """Return the OpenAI-format schemas for local tools."""
-    return [
+    return get_job_tools() + [
         {
             "type": "function",
             "function": {
@@ -26,7 +120,7 @@ Edge cases & limitations:
 - Output is captured up to 1 MiB per stream; only the first and last 16 KiB of each stream are returned, with a truncation note.
 - Some commands may require human approval (1/2/3 escalation). If denied, adapt your plan.
 
-Boundaries: DO NOT use a trailing or embedded '&'. Background execution is not supported and is rejected. Commands such as nohup, setsid, disown, screen, tmux, at, and batch are also rejected. Use write_file to write files.""",
+Boundaries: DO NOT use a trailing or embedded '&'. Background execution is not supported and is rejected; for a long-running process use start_job. Commands such as nohup, setsid, disown, screen, tmux, at, and batch are also rejected. Use write_file to write files.""",
                 "parameters": {
                     "type": "object",
                     "properties": {

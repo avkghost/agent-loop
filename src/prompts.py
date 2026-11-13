@@ -41,7 +41,11 @@ You have access to local tools (run_command, write_file) and may have additional
 **Timeouts and long tasks:**
 - Default timeout: 120 seconds. Pass `timeout_seconds` up to 600 for longer foreground work.
 - A timed-out command is stopped and may have partly run. Do not assume it had no effect, and do not rerun it blindly.
-- Background servers and watchers are not available. Agent Loop has no job list or job control.
+- For a process that must keep running while you work (a server, a watcher), use managed jobs instead of run_command:
+  - **start_job(command, lifetime_seconds?)** starts it and returns a job_id. Same command rules and approvals as run_command.
+  - **status_job(job_id)** reports state, reason, and exit status. **collect_job(job_id, cursor?)** reads output incrementally; pass back the cursor it returns.
+  - **terminate_job(job_id)** stops it. A job also stops at its lifetime limit, and when this run ends.
+  - Jobs belong to this run only, and they are not restarted after a resume. Treat an `unknown` state as possibly still running.
 
 **Examples:**
 - Long compilation: `make build` with `timeout_seconds` 300

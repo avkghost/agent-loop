@@ -552,7 +552,7 @@ Sessions saved by the current runtime use format 4, with `objective`, `summary`,
 - **File writes** encode the content first and write a temporary file in the same directory before replacing the target. A failure before the replacement leaves the existing file unchanged and is reported as a definitive failure. Only a replacement that reports an error after the temporary file was consumed is `unknown_outcome`. `read_file` accepts UTF-8 text only; binary content is refused as a validation error.
 - **Path containment** is checked on resolved paths (symlinks followed) by path component. It is not an operating-system sandbox and does not defend against other processes changing the filesystem concurrently.
 - **Session writes** are replaced atomically (temporary file, then rename), so an interrupted write keeps the previous session file. Durability on power loss is not guaranteed.
-- **Shell commands are foreground only.** Syntax is checked quote-aware before approval or execution. A background `&` is rejected when it is unquoted and unescaped and not part of `&&`, `&>`, or `2>&1`; so `sleep 100 &` and `sleep 1 & echo done` are rejected, while `echo "a & b"`, `echo a\&b`, `a && b`, and `cmd 2>&1` are allowed. Detaching commands (`nohup`, `setsid`, `disown`, `screen`, `tmux`, `at`, `batch`) are rejected. Unsupported grammar is rejected before any process starts: command substitution `$(...)` and backticks, subshells `( ... )`, and here-documents `<<`. Background servers and watchers are not supported. Managed background jobs are planned, not available.
+- **Shell commands are foreground only.** Syntax is checked quote-aware before approval or execution. A background `&` is rejected when it is unquoted and unescaped and not part of `&&`, `&>`, or `2>&1`; so `sleep 100 &` and `sleep 1 & echo done` are rejected, while `echo "a & b"`, `echo a\&b`, `a && b`, and `cmd 2>&1` are allowed. Detaching commands (`nohup`, `setsid`, `disown`, `screen`, `tmux`, `at`, `batch`) are rejected. Unsupported grammar is rejected before any process starts: command substitution `$(...)` and backticks, subshells `( ... )`, and here-documents `<<`. Background servers and watchers are not run this way; use managed jobs (below) for them.
 - **Shell limits.** Default timeout 120 s; `timeout_seconds` may be 1 to 600. Stdin is `/dev/null`, so a command cannot read the REPL's input. Each stream keeps at most 1 MiB in memory; the model and journal see only its first and last 16 KiB, with a truncation note. Exit codes are reported (`[exit code N]`) and are not treated as tool errors.
 - **Timeouts and cancellation.** On timeout or cancellation the command's process group is stopped: SIGTERM, then SIGKILL after 5 s if the group is not empty. Cleanup runs to completion even if the command is cancelled again; the cancellation then propagates. A leader is reaped only after its group is confirmed empty. Group membership is read from the process table (`ps`), zombies are ignored, and a failed or unavailable membership check is never treated as an empty group. A timeout is `unknown_outcome` and is not retried. Descendants that stay in the group are stopped. Descendants that start their own session (`setsid`, daemons) leave the group and are not tracked.
 - **Unconfirmed stops.** A leader whose group could not be confirmed empty is retained, still unreaped, so its process-group id stays reserved. Retained groups are retried on later commands and are SIGKILLed at normal exit. At most 8 may be retained: while the cap is reached, new commands are refused before anything starts, and no retained process is discarded. If another part of the process reaps a command's leader, the command is reported as `unknown_outcome`, its group is not signalled, and its exit status is not claimed. SIGKILL of the agent process, power loss, and a process-group id reused in the narrow window between a leader's exit and its reap are not covered.
@@ -565,6 +565,41 @@ Before compaction: 45 messages (116,736 tokens / 131,072 = 89%)
 After compaction:  6 messages (24,576 tokens) + summary
 → Loop continues for 20+ more iterations
 ```
+
+### Managed Background Jobs
+
+For a long-running local process (a server, a watcher), the agent starts a **managed job** instead of a foreground command:
+
+| Tool | Purpose |
+|---|---|
+| `start_job(command, lifetime_seconds?)` | Start the command and return an opaque `job_id`. Same command rules and approvals as `run_command`. |
+| `status_job(job_id)` | State, reason, exit status, group state, remaining lifetime. |
+| `collect_job(job_id, cursor?)` | Output since the cursor, 16 KiB per stream per call. Pass back the returned cursor. |
+| `terminate_job(job_id)` | SIGTERM to the process group, SIGKILL after a bounded grace period. |
+
+**Lifecycle.** `starting` → `running` → one of:
+- `completed`: the leader exited with status 0.
+- `failed`: nonzero exit, or killed by a signal nobody requested.
+- `terminated`: a stop was requested (by the model, the lifetime limit, the end of the owning session, or runtime shutdown) and the process group was confirmed empty.
+- `unknown`: a stop could not be confirmed, or another part of the process reaped the leader. Processes may still be running, and the job is never reported as completed or failed. It moves to `terminated` only when a later check confirms the group is empty.
+
+**Ownership and lifetime.**
+- A job belongs to the agent session that started it. Other sessions get the same "not found" answer for any id they do not own.
+- A job lives across the model's turns in that session. It is terminated when the session ends, and every job is terminated at runtime shutdown.
+- Jobs are not saved in the session file. A resumed session cannot see or restart an earlier job, and nothing is restarted automatically.
+- Each job has a lifetime watchdog (default 600 s, at most 3600 s). It runs on its own worker thread, so it fires even while a model request is blocking the agent.
+
+**Cursors.** A cursor is opaque and authenticated. It is valid only for the job that issued it and only for the current runtime. A forged, altered, or foreign cursor gets one generic answer that reveals nothing about the other job. A cursor older than the buffer is accepted, and the dropped bytes are reported.
+
+**Shutdown and failures.** Runtime shutdown is idempotent. Once it begins, new work is refused until it completes, and a closed runtime is never reopened implicitly. Failures in a job's helper tasks are recorded in diagnostics and never left unretrieved. If output capture, lifetime enforcement, or leader supervision fails, the job is stopped rather than left unmanaged.
+
+**Output.** Each stream keeps at most 1 MiB in memory. Older bytes are dropped first, and `collect_job` reports how many bytes were dropped. Output is drained continuously, so a chatty job cannot block on a full pipe.
+
+**Limits** (in `src/config.py`): `JOB_MAX_CONCURRENT` (4), `JOB_DEFAULT_LIFETIME_SECONDS` (600), `JOB_MAX_LIFETIME_SECONDS` (3600), `JOB_OUTPUT_BUFFER_BYTES` (1 MiB), `JOB_RETENTION_SECONDS` (600), `JOB_RETENTION_MAX` (32), `JOB_MAX_RETAINED` (8), `JOB_GRACE_SECONDS` (5), `JOB_KILL_CONFIRM_SECONDS` (5), `JOB_SHUTDOWN_TIMEOUT_SECONDS` (30).
+
+**Runtime shutdown and crashes.** On a normal exit the runtime terminates every running job, escalates where needed, reaps, and closes its pipes. Unconfirmed stops are reported at exit. This is done explicitly by the CLI and does not depend on `atexit` alone. If the process is killed (SIGKILL, power loss, a crash), no cleanup runs. Jobs run in their own sessions, so they can keep running after the agent is gone. Nothing in Agent Loop reaps them afterwards.
+
+**Platform.** POSIX only, and `ps` (procps) must be installed, as for foreground commands.
 
 ### Troubleshooting Token Issues
 
