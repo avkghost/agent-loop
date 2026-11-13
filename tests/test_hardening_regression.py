@@ -4,6 +4,7 @@ All LLM, tool and process interaction is mocked. Nothing here starts a real proc
 network, or touches the repository outside pytest's tmp_path.
 """
 
+from tests import scripted_provider  # noqa: E402
 import asyncio
 import copy
 import json
@@ -67,12 +68,12 @@ def _drive(monkeypatch, responses, dispatch_fn, *, summarizer=None, session_id=N
         if "tools" not in body:  # compaction summarizer request (no tools key)
             summary_posts.append(body)
             if summarizer is None:
-                return JSONResponse({"choices": [{"message": {"content": "Earlier work summarized."}}]})
+                return JSONResponse({"choices": [{"message": {"content": "Earlier work summarized."}, "finish_reason": "stop"}]})
             return summarizer(body)
         loop_posts.append(body)
         return responses.pop(0)
 
-    monkeypatch.setattr(loop.requests, "post", post)
+    monkeypatch.setattr(scripted_provider, "POST", post)
     monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
     monkeypatch.setattr(dispatch, "dispatch_tool", dispatch_fn)
     async def _dispatch_async(tool_name, tool_input, mcp_client=None, event_loop=None, allowed_tools=None):
@@ -312,12 +313,12 @@ def _invalid_payload_summarizer(body):
 
 
 def _empty_summarizer(body):
-    return JSONResponse({"choices": [{"message": {"content": ""}}]})
+    return JSONResponse({"choices": [{"message": {"content": ""}, "finish_reason": "stop"}]})
 
 
 def _oversized_summarizer(body):
     limit_chars = int(config.MAX_TOKENS * 0.2 * 4)
-    return JSONResponse({"choices": [{"message": {"content": "x" * (limit_chars + 400)}}]})
+    return JSONResponse({"choices": [{"message": {"content": "x" * (limit_chars + 400)}, "finish_reason": "stop"}]})
 
 
 @pytest.mark.parametrize("summarizer", [
@@ -376,13 +377,13 @@ def test_summary_does_not_create_adjacent_user_messages(monkeypatch):
             return None
 
         def json(self):
-            return {"choices": [{"message": {"content": "summary"}}]}
+            return {"choices": [{"message": {"content": "summary"}, "finish_reason": "stop"}]}
 
-    monkeypatch.setattr(compaction.requests, "post", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(scripted_provider, "POST", lambda *args, **kwargs: Response())
     import asyncio
     event_loop = asyncio.new_event_loop()
     try:
-        result = event_loop.run_until_complete(compaction.compact_messages(messages, event_loop))
+        result = event_loop.run_until_complete(compaction.compact_messages(messages))
     finally:
         event_loop.close()
 

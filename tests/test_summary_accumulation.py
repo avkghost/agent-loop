@@ -3,6 +3,7 @@
 Compaction is driven directly with a mocked summarizer. Nothing calls a real model or tool.
 """
 
+from tests import scripted_provider  # noqa: E402
 import asyncio
 import copy
 import json
@@ -37,7 +38,7 @@ class SummarizerStub:
                 return None
 
             def json(self):
-                return {"choices": [{"message": {"content": text}}]}
+                return {"choices": [{"message": {"content": text}, "finish_reason": "stop"}]}
 
         return Response()
 
@@ -56,7 +57,7 @@ def _round(messages, round_index):
 
 def _compact_rounds(monkeypatch, rounds, stub=None, goal=OBJECTIVE):
     stub = stub or SummarizerStub()
-    monkeypatch.setattr(compaction.requests, "post", stub)
+    monkeypatch.setattr(scripted_provider, "POST", stub)
     state = compaction.CompactionState(goal)
     stub.state = state
     messages = [{"role": "system", "content": "SYS"}, {"role": "user", "content": goal}]
@@ -66,7 +67,7 @@ def _compact_rounds(monkeypatch, rounds, stub=None, goal=OBJECTIVE):
         for r in range(rounds):
             messages = _round(messages, r)
             messages = event_loop.run_until_complete(
-                compaction.compact_messages(messages, event_loop, state=state)
+                compaction.compact_messages(messages, state=state)
             )
             history.append(copy.deepcopy(messages))
     finally:
@@ -132,10 +133,10 @@ def test_fallback_drops_a_previous_summary_that_exceeds_the_current_budget(monke
     monkeypatch.setattr(config, "MAX_TOKENS", 100)  # the stored summary no longer fits the budget
     messages = _round(history[0], 9)
     event_loop = asyncio.new_event_loop()
-    monkeypatch.setattr(compaction.requests, "post", lambda *a, **k: (_ for _ in ()).throw(ConnectionError("down")))
+    monkeypatch.setattr(scripted_provider, "POST", lambda *a, **k: (_ for _ in ()).throw(ConnectionError("down")))
     try:
         result = event_loop.run_until_complete(
-            compaction.compact_messages(messages, event_loop, state=stub.state)
+            compaction.compact_messages(messages, state=stub.state)
         )
     finally:
         event_loop.close()
@@ -227,7 +228,7 @@ def test_run_preserves_a_goal_containing_a_marker_in_provider_messages(monkeypat
     from tests.conftest import make_streamed_response
     posts = []
     monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
-    monkeypatch.setattr(loop.requests, "post", lambda *a, **k: posts.append(k["json"]) or make_streamed_response())
+    monkeypatch.setattr(scripted_provider, "POST", lambda *a, **k: posts.append(k["json"]) or make_streamed_response())
     event_loop = asyncio.new_event_loop()
     try:
         event_loop.run_until_complete(loop.agent_loop_async(
@@ -243,9 +244,9 @@ def test_structured_state_does_not_parse_marker_text_from_model_summary(monkeypa
             return None
 
         def json(self):
-            return {"choices": [{"message": {"content": "model text [Context Summary] literal"}}]}
+            return {"choices": [{"message": {"content": "model text [Context Summary] literal"}, "finish_reason": "stop"}]}
 
-    monkeypatch.setattr(compaction.requests, "post", lambda *a, **k: Response())
+    monkeypatch.setattr(scripted_provider, "POST", lambda *a, **k: Response())
     marker_objective = "Objective: user [Context Summary] [Recent User Message] text"
     state = compaction.CompactionState(objective=marker_objective)
     messages = _round([{"role": "system", "content": "SYS"},
@@ -253,7 +254,7 @@ def test_structured_state_does_not_parse_marker_text_from_model_summary(monkeypa
     event_loop = asyncio.new_event_loop()
     try:
         result = event_loop.run_until_complete(
-            compaction.compact_messages(messages, event_loop, state=state)
+            compaction.compact_messages(messages, state=state)
         )
     finally:
         event_loop.close()

@@ -4,6 +4,7 @@ Real-process tests run harmless child interpreters inside a temporary directory.
 and teardown stops the runtime and kills anything left behind.
 """
 
+from tests import scripted_provider  # noqa: E402
 import asyncio
 import copy
 import gc
@@ -496,7 +497,7 @@ class _BlockingPost:
 
 def _run_session(monkeypatch, replies, session_id):
     post = _BlockingPost(replies)
-    monkeypatch.setattr(loop.requests, "post", post)
+    monkeypatch.setattr(scripted_provider, "POST", post)
     monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
     event_loop = asyncio.new_event_loop()
     try:

@@ -1,3 +1,4 @@
+from tests import scripted_provider  # noqa: E402
 import asyncio
 import requests
 import pytest
@@ -39,11 +40,11 @@ def run_compaction(monkeypatch, response_json):
         def json(self):
             return response_json
 
-    monkeypatch.setattr(compaction.requests, "post", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(scripted_provider, "POST", lambda *args, **kwargs: Response())
     event_loop = asyncio.new_event_loop()
     try:
         return event_loop.run_until_complete(
-            compaction.compact_messages(messages_fixture(), event_loop)
+            compaction.compact_messages(messages_fixture())
         )
     finally:
         event_loop.close()
@@ -73,7 +74,7 @@ def test_active_loop_calls_summarizing_helper(monkeypatch, run_loop, streamed_re
 def test_helper_success_preserves_summary_and_tail(monkeypatch):
     result = run_compaction(
         monkeypatch,
-        {"choices": [{"message": {"content": "summary"}}]},
+        {"choices": [{"message": {"content": "summary"}, "finish_reason": "stop"}]},
     )
 
     assert result[0]["role"] == "system"
@@ -92,17 +93,17 @@ def test_summary_includes_messages_before_adjusted_tail(monkeypatch):
             return None
 
         def json(self):
-            return {"choices": [{"message": {"content": "summary"}}]}
+            return {"choices": [{"message": {"content": "summary"}, "finish_reason": "stop"}]}
 
     def post(*args, **kwargs):
         captured["payload"] = kwargs["json"]
         return Response()
 
-    monkeypatch.setattr(compaction.requests, "post", post)
+    monkeypatch.setattr(scripted_provider, "POST", post)
     event_loop = asyncio.new_event_loop()
     try:
         compaction_result = event_loop.run_until_complete(
-            compaction.compact_messages(messages_fixture(), event_loop)
+            compaction.compact_messages(messages_fixture())
         )
     finally:
         event_loop.close()
@@ -116,11 +117,11 @@ def test_helper_exception_uses_hard_truncation(monkeypatch):
     def fail(*args, **kwargs):
         raise RuntimeError("summarizer unavailable")
 
-    monkeypatch.setattr(compaction.requests, "post", fail)
+    monkeypatch.setattr(scripted_provider, "POST", fail)
     event_loop = asyncio.new_event_loop()
     try:
         result = event_loop.run_until_complete(
-            compaction.compact_messages(messages_fixture(), event_loop)
+            compaction.compact_messages(messages_fixture())
         )
     finally:
         event_loop.close()
@@ -155,11 +156,11 @@ def test_timeout_uses_protocol_valid_fallback(monkeypatch):
     def timeout(*args, **kwargs):
         raise requests.exceptions.Timeout("summary timeout")
 
-    monkeypatch.setattr(compaction.requests, "post", timeout)
+    monkeypatch.setattr(scripted_provider, "POST", timeout)
     event_loop = asyncio.new_event_loop()
     try:
         result = event_loop.run_until_complete(
-            compaction.compact_messages(messages_fixture(), event_loop)
+            compaction.compact_messages(messages_fixture())
         )
     finally:
         event_loop.close()
@@ -174,7 +175,7 @@ def test_oversized_summary_uses_fallback(monkeypatch):
     monkeypatch.setattr(config, "COMPACT_THRESHOLD", 1.0)
     result = run_compaction(
         monkeypatch,
-        {"choices": [{"message": {"content": "x" * 1000}}]},
+        {"choices": [{"message": {"content": "x" * 1000}, "finish_reason": "stop"}]},
     )
     assert result[1]["content"] == "old request"
     assert not any("[Context Summary]" in (m.get("content") or "") for m in result)
@@ -186,7 +187,7 @@ def _compact_messages(monkeypatch, messages, summaries, state=None):
             return None
 
         def json(self):
-            return {"choices": [{"message": {"content": summaries.pop(0)}}]}
+            return {"choices": [{"message": {"content": summaries.pop(0)}, "finish_reason": "stop"}]}
 
     prompts_seen = []
 
@@ -194,11 +195,11 @@ def _compact_messages(monkeypatch, messages, summaries, state=None):
         prompts_seen.append(kwargs["json"]["messages"][1]["content"])
         return Response()
 
-    monkeypatch.setattr(compaction.requests, "post", post)
+    monkeypatch.setattr(scripted_provider, "POST", post)
     event_loop = asyncio.new_event_loop()
     try:
         result = event_loop.run_until_complete(
-            compaction.compact_messages(messages, event_loop, state=state)
+            compaction.compact_messages(messages, state=state)
         )
     finally:
         event_loop.close()
@@ -270,9 +271,9 @@ def test_failed_compaction_after_success_drops_old_summary_without_dropping_obje
             return None
 
         def json(self):
-            return {"choices": [{"message": {"content": "first summary"}}]}
+            return {"choices": [{"message": {"content": "first summary"}, "finish_reason": "stop"}]}
 
-    monkeypatch.setattr(compaction.requests, "post", lambda *a, **k: Response())
+    monkeypatch.setattr(scripted_provider, "POST", lambda *a, **k: Response())
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "Objective: durable objective"},
@@ -287,14 +288,14 @@ def test_failed_compaction_after_success_drops_old_summary_without_dropping_obje
     event_loop = asyncio.new_event_loop()
     try:
         state = compaction.CompactionState(messages[1]["content"])
-        compacted = event_loop.run_until_complete(compaction.compact_messages(messages, event_loop, state=state))
+        compacted = event_loop.run_until_complete(compaction.compact_messages(messages, state=state))
 
         def fail(*args, **kwargs):
             raise requests.exceptions.Timeout("second summary failed")
 
-        monkeypatch.setattr(compaction.requests, "post", fail)
+        monkeypatch.setattr(scripted_provider, "POST", fail)
         compacted += [{"role": "user", "content": "u4"}, {"role": "assistant", "content": "a4"}]
-        fallback = event_loop.run_until_complete(compaction.compact_messages(compacted, event_loop, state=state))
+        fallback = event_loop.run_until_complete(compaction.compact_messages(compacted, state=state))
     finally:
         event_loop.close()
 
@@ -321,4 +322,4 @@ def test_compaction_reports_when_objective_alone_cannot_fit(monkeypatch):
 
     monkeypatch.setattr(config, "MAX_TOKENS", 1)
     with pytest.raises(compaction.CannotCompactError, match="Cannot compact conversation"):
-        run_compaction(monkeypatch, {"choices": [{"message": {"content": "summary"}}]})
+        run_compaction(monkeypatch, {"choices": [{"message": {"content": "summary"}, "finish_reason": "stop"}]})

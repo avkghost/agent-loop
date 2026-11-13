@@ -182,3 +182,9 @@ def print_max_iterations_reached() -> None:
 def print_finish_reason_warning(finish_reason: str) -> None:
     """Print warning for unexpected finish reason."""
     console.print(f"\n[yellow]⚠️  Loop ended with finish_reason: {finish_reason}[/yellow]")
+
+
+def print_usage(usage) -> None:
+    """Token usage for one turn. The source is shown, so an estimate is never mistaken for a reported count."""
+    print(f"📊 tokens ({usage.source}): prompt {usage.prompt_tokens}, completion {usage.completion_tokens}, "
+          f"total {usage.total_tokens}")

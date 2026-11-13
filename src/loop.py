@@ -3,11 +3,11 @@
 import asyncio
 import json
 import uuid
-import requests
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 from . import config, envelope, prompts, dispatch, render, compaction, session, execution, jobs, stream
+from . import provider as provider_mod
 from .tools import get_all_tools
 from .tools.mcp_client import MCPClientManager
 
@@ -134,6 +134,19 @@ async def _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, allowe
         )
 
 
+def _turn_failure_message(turn) -> str:
+    detail = turn.error.message if turn.error is not None else ""
+    if turn.outcome == provider_mod.TurnOutcome.INCOMPLETE:
+        return (f"Model stream incomplete: {detail}. The turn was discarded and no tool was run. "
+                "The run stops without claiming completion.")
+    if turn.outcome == provider_mod.TurnOutcome.MALFORMED:
+        return (f"Model stream malformed: {detail}. The turn was discarded and no tool was run. "
+                "The run stops without claiming completion.")
+    if turn.outcome == provider_mod.TurnOutcome.TRANSPORT:
+        return f"Transport error during the model stream: {detail}. The turn was discarded and no tool was run."
+    return f"LM Studio request failed ({turn.outcome.value}): {detail}."
+
+
 def _serialize_observation(observation):
     """Convert a tool observation into the string sent back to the model."""
     if isinstance(observation, dict) and "isError" in observation:
@@ -176,23 +189,28 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
     """Run one agent session. Managed jobs started here belong to this session and are terminated when it ends."""
     owner = session_id or f"run-{uuid.uuid4().hex}"
     token = jobs.bind_owner(owner)
+    provider = provider_mod.make_provider()
     try:
         await _agent_loop_run(user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override,
                               session_id=session_id, resume_messages=resume_messages,
                               resume_objective=resume_objective, resume_summary=resume_summary,
-                              resume_execution=resume_execution)
+                              resume_execution=resume_execution, provider=provider)
     finally:
         try:
-            await jobs.end_session(owner)
+            await provider.aclose()
         finally:
-            jobs.unbind_owner(token)
+            try:
+                await jobs.end_session(owner)
+            finally:
+                jobs.unbind_owner(token)
 
 
 async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_loop: asyncio.AbstractEventLoop,
                             system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
                             session_id: Optional[str] = None, resume_messages: Optional[list] = None,
                             resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
-                            resume_execution: Optional[list] = None) -> None:
+                            resume_execution: Optional[list] = None,
+                            provider: Optional[Any] = None) -> None:
     """Main agent loop (async version for MCP support).
 
     Args:
@@ -202,6 +220,8 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
         system_prompt_override: Optional custom system prompt (overrides default)
         tool_allowlist_override: Optional list of allowed tool names (filters available tools)
     """
+    if provider is None:
+        provider = provider_mod.make_provider()
 
     # Use override system prompt if provided, otherwise use default
     system_prompt = system_prompt_override if system_prompt_override else prompts.SYSTEM_PROMPT
@@ -279,9 +299,10 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
         if current_tokens > (config.MAX_TOKENS * config.COMPACT_THRESHOLD):
             # Summarize the middle of the history; compact_messages falls back to hard truncation on failure
             try:
-                messages = await compaction.compact_messages(
-                    messages, event_loop, mcp_client, state=state
-                )
+                messages = await compaction.compact_messages(messages, provider, state=state)
+                if state.last_failure:
+                    render.print_llm_error(f"Context summary failed ({state.last_failure}); using bounded truncation.")
+                    state.last_failure = None
                 if not _persist():
                     return
             except compaction.CannotCompactError as e:
@@ -290,73 +311,46 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
             after_tokens = sum(get_token_count(msg.get('content', '') or json.dumps(msg)) for msg in messages)
             render.print_compaction_notice(current_tokens, after_tokens)
 
-        # 1. Query LM Studio
-        payload = {
-            "model": config.MODEL_NAME,
-            "messages": messages,
-            "tools": tools,
-            "tool_choice": "auto",
-            "temperature": 0.2,
-            "max_tokens": config.REQUEST_MAX_TOKENS,  # Per-request limit; MAX_TOKENS is total conversation budget
-            "stream": True  # Enable streaming
-        }
-
-        # Try with retries on timeout. A turn is complete only if its stream says so (see src/stream.py).
-        # Retries happen only before the turn's tool calls are dispatched, which is always the case here.
-        result = None
-        last_error = None
-
+        # 1. Ask the model. Transport, SSE, and completion rules live in provider.py and stream.py.
+        turn = None
         for attempt in range(1 + config.LM_STUDIO_RETRIES):
-            try:
-                if attempt > 0:
-                    wait_time = config.LM_STUDIO_RETRY_BASE * (config.LM_STUDIO_RETRY_BACKOFF ** (attempt - 1))
-                    render.print_retry_notice(attempt, config.LM_STUDIO_RETRIES, wait_time)
-                    import time
-                    time.sleep(wait_time)
-
-                response = requests.post(
-                    config.LM_STUDIO_URL,
-                    json=payload,
-                    timeout=(config.LM_STUDIO_CONNECT_TIMEOUT, config.LM_STUDIO_TIMEOUT),
-                    stream=True
-                )
-                try:
-                    response.raise_for_status()
-                    print("\n🤖 Assistant: ", end="", flush=True)
-                    parsed = stream.parse_events(
-                        response.iter_lines(), on_text=lambda text: print(text, end="", flush=True))
-                finally:
-                    response.close()
-
-                print()  # New line after streaming completes
-                result = stream.to_completion(parsed)
-                break  # Complete, well-formed turn
-
-            except requests.exceptions.Timeout as e:
-                last_error = e
-                if attempt == config.LM_STUDIO_RETRIES:
-                    render.print_llm_error(f"LM Studio timeout after {attempt + 1} attempts: {str(e)}")
-                    break
-            except stream.StreamError as e:
-                # Incomplete or malformed: the turn is discarded, nothing is appended, and nothing is dispatched
-                last_error = e
-                render.print_llm_error(
-                    f"Model stream {e.category}: {e}. The turn was discarded and no tool was run. "
-                    "The run stops without claiming completion.")
+            if attempt > 0:
+                wait_time = config.LM_STUDIO_RETRY_BASE * (config.LM_STUDIO_RETRY_BACKOFF ** (attempt - 1))
+                render.print_retry_notice(attempt, config.LM_STUDIO_RETRIES, wait_time)
+                await asyncio.sleep(wait_time)  # nonblocking: other tasks and running jobs keep moving
+            print("\n🤖 Assistant: ", end="", flush=True)
+            turn = await provider.complete(messages, tools, provider_mod.GenerationOptions(),
+                                           on_text=lambda text: print(text, end="", flush=True))
+            print()  # New line after streaming completes
+            # Retries happen only before any tool call of this turn is dispatched, which is always the case here
+            if turn.outcome != provider_mod.TurnOutcome.TIMEOUT:
                 break
-            except requests.exceptions.RequestException as e:
-                # Transport failure, including a connection that drops mid-stream
-                last_error = e
-                render.print_llm_error(
-                    f"Transport error during the model stream: {e}. The turn was discarded and no tool was run.")
-                break
-            except Exception as e:
-                last_error = e
-                render.print_llm_error(str(e))
-                break  # Don't retry on non-timeout errors
 
-        if result is None:
+        if turn.outcome == provider_mod.TurnOutcome.TIMEOUT:
+            render.print_llm_error(f"LM Studio timeout after {attempt + 1} attempts: {turn.error.message}")
             break
+        if turn.outcome == provider_mod.TurnOutcome.LENGTH:
+            render.print_llm_error(
+                "Model response was cut off by the length limit (finish_reason=length). The turn was discarded "
+                "and no tool was run. The run stops without claiming completion.")
+            break
+        if not turn.succeeded:
+            render.print_llm_error(_turn_failure_message(turn))
+            break
+
+        if turn.usage_error:
+            print(f"⚠️ provider usage not used: {turn.usage_error}")
+        if turn.usage is not None:
+            usage = turn.usage
+        else:
+            prompt_estimate = sum(get_token_count(msg.get('content', '') or json.dumps(msg)) for msg in messages)
+            usage = provider_mod.TokenUsage.estimated(prompt_estimate, get_token_count(turn.content))
+        render.print_usage(usage)
+
+        message = {"content": turn.content}
+        if turn.tool_calls:
+            message["tool_calls"] = turn.tool_calls
+        result = {"choices": [{"message": message, "finish_reason": turn.finish_reason.value}]}
 
         # Get the assistant's response
         if not result.get("choices") or not result["choices"]:

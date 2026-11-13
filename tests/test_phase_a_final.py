@@ -4,6 +4,7 @@ External boundaries are mocked: the LLM (requests.post) and the MCP transport se
 MCP client, dispatcher, loop, journal, and session code all run for real.
 """
 
+from tests import scripted_provider  # noqa: E402
 import asyncio
 import copy
 import json
@@ -50,7 +51,7 @@ class FakeTransport:
 
 def run_agent(monkeypatch, replies, *, mcp_client=None, session_id=None, **kwargs):
     llm = ScriptedLLM(replies)
-    monkeypatch.setattr(loop.requests, "post", llm)
+    monkeypatch.setattr(scripted_provider, "POST", llm)
     monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
     client = mcp_client or MCPClientManager()
     event_loop = asyncio.new_event_loop()

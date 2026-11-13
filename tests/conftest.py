@@ -1,3 +1,4 @@
+from tests import scripted_provider  # noqa: E402
 import asyncio
 import copy
 import inspect
@@ -85,7 +86,7 @@ class ScriptedPost:
 def fake_post(monkeypatch):
     def install(responses):
         post = ScriptedPost(responses)
-        monkeypatch.setattr(loop.requests, "post", post)
+        monkeypatch.setattr(scripted_provider, "POST", post)
         return post
 
     return install
@@ -112,7 +113,7 @@ def run_loop(monkeypatch):
         **config_overrides,
     ):
         post = ScriptedPost(responses)
-        monkeypatch.setattr(loop.requests, "post", post)
+        monkeypatch.setattr(scripted_provider, "POST", post)
         monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
 
         calls = []
@@ -156,6 +157,12 @@ def run_loop(monkeypatch):
         return post, calls
 
     return run
+
+
+@pytest.fixture(autouse=True)
+def _scripted_model_boundary(monkeypatch):
+    """Every test talks to a scripted model. Nothing in the suite can reach a real endpoint."""
+    scripted_provider.install(monkeypatch)
 
 
 @pytest.fixture

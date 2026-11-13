@@ -6,6 +6,7 @@
 4. Crash after dispatch: the unresolved call is on disk and no outcome is recorded.
 """
 
+from tests import scripted_provider  # noqa: E402
 import asyncio
 import copy
 import json
@@ -41,7 +42,7 @@ def _run(monkeypatch, responses, dispatch_fn, *, summarizer_fails=False, session
         payloads.append(("loop", body))
         return responses.pop(0)
 
-    monkeypatch.setattr(loop.requests, "post", post)
+    monkeypatch.setattr(scripted_provider, "POST", post)
     monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
     monkeypatch.setattr(dispatch, "dispatch_tool", dispatch_fn)
     async def _dispatch_async(tool_name, tool_input, mcp_client=None, event_loop=None, allowed_tools=None):

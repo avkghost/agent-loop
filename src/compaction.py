@@ -2,11 +2,11 @@
 
 import asyncio
 import json
-import requests
 from dataclasses import dataclass
 from typing import List, Dict, Any, Optional
 
 from . import config, envelope, prompts
+from . import provider as provider_mod
 
 
 SUMMARY_BUDGET_FRACTION = 0.2  # max share of MAX_TOKENS a summary may occupy
@@ -24,6 +24,8 @@ class CompactionState:
 
     objective: Optional[str]
     summary: Optional[str] = None
+    # Most recent summarization failure, for the runtime to report. Not part of the session format.
+    last_failure: Optional[str] = None
 
 
 def _recent_tail_start(messages: List[Dict[str, Any]], keep: int = 4) -> int:
@@ -147,10 +149,14 @@ def restore_structured_state(messages: List[Dict[str, Any]], state: CompactionSt
     return _assemble(messages[0], state.objective, state.summary, _recent_tail(messages))
 
 
+def _record_failure(state: Optional[CompactionState], reason: str) -> None:
+    if state is not None:
+        state.last_failure = reason
+
+
 async def compact_messages(
     messages: List[Dict[str, Any]],
-    event_loop: asyncio.AbstractEventLoop,
-    mcp_client: Optional[Any] = None,
+    provider: Optional[Any] = None,
     state: Optional[CompactionState] = None,
 ) -> List[Dict[str, Any]]:
     """Compact messages by summarizing dropped middle messages via LLM.
@@ -187,35 +193,43 @@ Previous compacted summary (carry forward useful context, but replace it with yo
 
 Provide a brief summary (2-3 sentences) of what has been done and decided."""
 
-        # Call LLM to summarize
-        payload = {
-            "model": config.MODEL_NAME,
-            "messages": [
-                {"role": "system", "content": "You are a helpful assistant that creates concise summaries."},
-                {"role": "user", "content": summary_prompt}
-            ],
-            "temperature": 0.3,
-            "max_tokens": 500,
-        }
-
-        response = requests.post(config.LM_STUDIO_URL, json=payload, timeout=10)
-        response.raise_for_status()
-        result = response.json()
-
-        summary_text = result.get("choices", [{}])[0].get("message", {}).get("content", "")
-
-        # A summary may use at most this share of the conversation budget (heuristic: 4 chars ~= 1 token).
-        # Larger output is rejected and the controlled hard-truncation fallback is used instead.
-        if summary_text and len(summary_text) // 4 <= config.MAX_TOKENS * SUMMARY_BUDGET_FRACTION:
-            # Objective and summary share one user message; retain the largest tail that fits.
-            candidate = _budgeted_assembly(system_msg, objective, summary_text, messages)
-            if candidate is not None:
-                if state is not None:
-                    state.summary = summary_text
-                return candidate
-
-    except Exception:
-        pass  # Fall through to hard truncation
+        # One summary request through the provider boundary. It carries no tool declarations.
+        owns_provider = provider is None
+        if owns_provider:
+            provider = provider_mod.make_provider()
+        try:
+            turn = await provider.complete(
+                [{"role": "system", "content": "You are a helpful assistant that creates concise summaries."},
+                 {"role": "user", "content": summary_prompt}],
+                None,
+                provider_mod.GenerationOptions(temperature=0.3, max_tokens=500, stream=False),
+            )
+        finally:
+            if owns_provider:
+                await provider.aclose()
+        if turn.outcome != provider_mod.TurnOutcome.COMPLETED:
+            detail = turn.error.message if turn.error is not None else "no completed answer"
+            _record_failure(state, f"summary request {turn.outcome.value}: {detail}")
+        else:
+            summary_text = turn.content
+            # A summary may use at most this share of the conversation budget (heuristic: 4 chars ~= 1 token).
+            # Larger output is rejected and the controlled hard-truncation fallback is used instead.
+            if summary_text and len(summary_text) // 4 <= config.MAX_TOKENS * SUMMARY_BUDGET_FRACTION:
+                # Objective and summary share one user message; retain the largest tail that fits.
+                candidate = _budgeted_assembly(system_msg, objective, summary_text, messages)
+                if candidate is not None:
+                    if state is not None:
+                        state.summary = summary_text
+                        state.last_failure = None
+                    return candidate
+                _record_failure(state, "summary does not fit the budget with the recent tail")
+            else:
+                _record_failure(state, "summary is empty or exceeds its budget share")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        # Never silent: the failure is recorded for the runtime to report, then the fallback runs
+        _record_failure(state, f"summarization raised {type(e).__name__}: {e}")
 
     # Fallback: bounded hard truncation, without carrying forward old summaries.
     if state is not None:

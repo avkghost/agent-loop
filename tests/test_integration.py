@@ -4,6 +4,7 @@ Model replies are streamed (SSE) because that is the only response shape the loo
 Tool dispatch is patched, so no shell command or file write runs.
 """
 
+from tests import scripted_provider  # noqa: E402
 import sys
 import json
 import asyncio
@@ -100,7 +101,7 @@ class TestIntegrationAgentLoop:
             ]
         }
 
-    @patch('src.loop.requests.post')
+    @patch('tests.scripted_provider.POST')
     def test_simple_completion(self, mock_post):
         """A reply without tool calls ends the run after one request."""
         mock_post.side_effect = scripted_post([
@@ -117,7 +118,7 @@ class TestIntegrationAgentLoop:
         assert "messages" in payload and "tools" in payload
 
     @patch('src.dispatch.dispatch_tool_async', new_callable=AsyncMock, return_value="ls output")
-    @patch('src.loop.requests.post')
+    @patch('tests.scripted_provider.POST')
     def test_tool_call_sequence(self, mock_post, mock_dispatch):
         """A tool call is dispatched once, its result is sent back, and the run completes."""
         mock_post.side_effect = scripted_post([
@@ -140,7 +141,7 @@ class TestIntegrationAgentLoop:
         assert not protocol_violations(second)
 
     @patch('src.dispatch.dispatch_tool_async', new_callable=AsyncMock, return_value="file written")
-    @patch('src.loop.requests.post')
+    @patch('tests.scripted_provider.POST')
     def test_write_file_with_search_warning(self, mock_post, mock_dispatch):
         """A write_file call is dispatched with its arguments, then the run completes."""
         mock_post.side_effect = scripted_post([
@@ -160,7 +161,7 @@ class TestIntegrationAgentLoop:
         assert mock_post.call_count == 2
 
     @patch('src.dispatch.dispatch_tool_async', new_callable=AsyncMock, side_effect=lambda *a, **k: "x" * 4000)
-    @patch('src.loop.requests.post')
+    @patch('tests.scripted_provider.POST')
     def test_context_compaction(self, mock_post, mock_dispatch):
         """Forced compaction: the summarizer is attempted, falls back to truncation, and every
         request stays protocol-valid until the run completes."""
@@ -192,7 +193,7 @@ class TestIntegrationAgentLoop:
         for index, body in enumerate(loop_requests):
             assert not protocol_violations(body["messages"]), f"request {index}: {protocol_violations(body['messages'])}"
 
-    @patch('src.loop.requests.post')
+    @patch('tests.scripted_provider.POST')
     def test_lm_studio_error_handling(self, mock_post):
         """A transport error ends the run without raising out of the loop."""
         mock_post.side_effect = Exception("Connection refused")
@@ -202,7 +203,7 @@ class TestIntegrationAgentLoop:
         assert mock_post.call_count == 1
 
     @patch('src.dispatch.dispatch_tool_async', new_callable=AsyncMock, return_value="ok")
-    @patch('src.loop.requests.post')
+    @patch('tests.scripted_provider.POST')
     def test_max_iterations_limit(self, mock_post, mock_dispatch):
         """The run makes exactly MAX_ITERATIONS requests when every reply asks for a tool."""
         always_tools = [self.mock_lm_studio_response(

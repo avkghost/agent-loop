@@ -1,3 +1,4 @@
+from tests import scripted_provider  # noqa: E402
 import json
 import asyncio
 from types import SimpleNamespace
@@ -83,7 +84,7 @@ def test_completed_tool_result_is_persisted_before_next_request(monkeypatch, str
             return next(responses)
         raise SimulatedInterruption("before next response")
 
-    monkeypatch.setattr(loop.requests, "post", post)
+    monkeypatch.setattr(scripted_provider, "POST", post)
     monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
     monkeypatch.setattr(loop.dispatch, "dispatch_tool", lambda *args, **kwargs: "persisted result")
 
@@ -105,7 +106,7 @@ def test_completed_tool_result_is_persisted_before_next_request(monkeypatch, str
     }]
 
     resumed_dispatches = []
-    monkeypatch.setattr(loop.requests, "post", lambda *args, **kwargs: make_streamed_response(
+    monkeypatch.setattr(scripted_provider, "POST", lambda *args, **kwargs: make_streamed_response(
         finish_reason="stop", content="resumed"
     ))
     monkeypatch.setattr(loop.dispatch, "dispatch_tool", lambda *args, **kwargs: resumed_dispatches.append(args))
@@ -192,10 +193,10 @@ def test_multiple_compactions_round_trip_without_nested_summaries(tmp_sessions, 
             return None
 
         def json(self):
-            return {"choices": [{"message": {"content": self.text}}]}
+            return {"choices": [{"message": {"content": self.text}, "finish_reason": "stop"}]}
 
     summaries = iter(["first summary", "second summary"])
-    monkeypatch.setattr(compaction.requests, "post", lambda *a, **k: Response(next(summaries)))
+    monkeypatch.setattr(scripted_provider, "POST", lambda *a, **k: Response(next(summaries)))
     messages = [
         {"role": "system", "content": "system"},
         {"role": "user", "content": "Objective: keep me"},
@@ -210,9 +211,9 @@ def test_multiple_compactions_round_trip_without_nested_summaries(tmp_sessions, 
     state = compaction.CompactionState(messages[1]["content"])
     event_loop = asyncio.new_event_loop()
     try:
-        messages = event_loop.run_until_complete(compaction.compact_messages(messages, event_loop, state=state))
+        messages = event_loop.run_until_complete(compaction.compact_messages(messages, state=state))
         messages += [{"role": "user", "content": "u4"}, {"role": "assistant", "content": "a4"}]
-        messages = event_loop.run_until_complete(compaction.compact_messages(messages, event_loop, state=state))
+        messages = event_loop.run_until_complete(compaction.compact_messages(messages, state=state))
     finally:
         event_loop.close()
 

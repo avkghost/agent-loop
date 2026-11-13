@@ -119,7 +119,7 @@ cp mcp_servers.json.example mcp_servers.json
 echo "# Your project guidelines" > AGENTS.md
 
 # Verify setup
-python3 -c "import requests, mcp, tiktoken, yaml, rich; print('✅ Python packages OK')"
+python3 -c "import httpx, mcp, tiktoken, yaml, rich; print('✅ Python packages OK')"
 ```
 
 #### Optional: npm-based MCP servers
@@ -141,7 +141,7 @@ npx -y @upstash/context7-mcp --version 2>/dev/null && echo "✅ MCP servers OK"
 ### Dependencies
 
 **Runtime Python Packages** (`requirements/base.txt`):
-- `requests` — HTTP client for LLM API calls
+- `httpx` — asynchronous HTTP client for LLM API calls (streaming, timeouts, cancellation)
 - `mcp` — Model Context Protocol library  
 - `tiktoken` — Token counting for OpenAI models
 - `pyyaml` — YAML parsing for agent/skill definitions
@@ -552,6 +552,7 @@ Sessions saved by the current runtime use format 4, with `objective`, `summary`,
 - **File writes** encode the content first and write a temporary file in the same directory before replacing the target. A failure before the replacement leaves the existing file unchanged and is reported as a definitive failure. Only a replacement that reports an error after the temporary file was consumed is `unknown_outcome`. `read_file` accepts UTF-8 text only; binary content is refused as a validation error.
 - **Path containment** is checked on resolved paths (symlinks followed) by path component. It is not an operating-system sandbox and does not defend against other processes changing the filesystem concurrently.
 - **Session writes** are replaced atomically (temporary file, then rename), so an interrupted write keeps the previous session file. Durability on power loss is not guaranteed.
+- **Model requests.** Requests go through an asynchronous provider (`src/provider.py`) on httpx with explicit connect, read, write, and pool timeouts. A turn is complete only when its stream carries a finish reason and the `[DONE]` terminator. An incomplete, malformed, length-limited, or failed turn is discarded: nothing from it is kept or dispatched, and the run reports the reason. Timeouts are retried with non-blocking backoff, but only before any tool call from that turn runs. Cancelling a run closes the HTTP response. Token usage is labelled `reported` when the server provides it, and `estimated` otherwise. Context summaries use the same provider, and a failed summary is reported before the bounded fallback runs.
 - **Shell commands are foreground only.** Syntax is checked quote-aware before approval or execution. A background `&` is rejected when it is unquoted and unescaped and not part of `&&`, `&>`, or `2>&1`; so `sleep 100 &` and `sleep 1 & echo done` are rejected, while `echo "a & b"`, `echo a\&b`, `a && b`, and `cmd 2>&1` are allowed. Detaching commands (`nohup`, `setsid`, `disown`, `screen`, `tmux`, `at`, `batch`) are rejected. Unsupported grammar is rejected before any process starts: command substitution `$(...)` and backticks, subshells `( ... )`, and here-documents `<<`. Background servers and watchers are not run this way; use managed jobs (below) for them.
 - **Shell limits.** Default timeout 120 s; `timeout_seconds` may be 1 to 600. Stdin is `/dev/null`, so a command cannot read the REPL's input. Each stream keeps at most 1 MiB in memory; the model and journal see only its first and last 16 KiB, with a truncation note. Exit codes are reported (`[exit code N]`) and are not treated as tool errors.
 - **Timeouts and cancellation.** On timeout or cancellation the command's process group is stopped: SIGTERM, then SIGKILL after 5 s if the group is not empty. Cleanup runs to completion even if the command is cancelled again; the cancellation then propagates. A leader is reaped only after its group is confirmed empty. Group membership is read from the process table (`ps`), zombies are ignored, and a failed or unavailable membership check is never treated as an empty group. A timeout is `unknown_outcome` and is not retried. Descendants that stay in the group are stopped. Descendants that start their own session (`setsid`, daemons) leave the group and are not tracked.

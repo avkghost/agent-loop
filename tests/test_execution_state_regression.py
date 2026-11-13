@@ -1,5 +1,6 @@
 """Deterministic lifecycle and recovery tests for durable tool-call state."""
 
+from tests import scripted_provider  # noqa: E402
 import copy
 import json
 
@@ -133,7 +134,7 @@ def test_compaction_does_not_change_execution_records(monkeypatch):
         def json(self):
             return {"choices": [{"message": {"content": "new summary"}}]}
 
-    monkeypatch.setattr(compaction.requests, "post", lambda *a, **k: Response())
+    monkeypatch.setattr(scripted_provider, "POST", lambda *a, **k: Response())
     messages = [
         {"role": "system", "content": "SYS"},
         {"role": "user", "content": "Objective: goal"},
@@ -145,7 +146,7 @@ def test_compaction_does_not_change_execution_records(monkeypatch):
     import asyncio
     event_loop = asyncio.new_event_loop()
     try:
-        compacted = event_loop.run_until_complete(compaction.compact_messages(messages, event_loop, state=state))
+        compacted = event_loop.run_until_complete(compaction.compact_messages(messages, state=state))
     finally:
         event_loop.close()
 
