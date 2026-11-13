@@ -120,20 +120,6 @@ def mcp_result_envelope(tool_name: str, result: Any) -> Dict[str, Any]:
     return success(body)
 
 
-def normalize_mcp_result(mcp_result: Dict[str, Any]) -> Dict[str, Any]:
-    """Normalize an MCP CallToolResult into our envelope shape."""
-    # If the result already has our structure, pass through
-    if "isError" in mcp_result:
-        return mcp_result
-
-    # Otherwise wrap it
-    return {
-        "content": str(mcp_result.get("content", "")),
-        "isError": mcp_result.get("isError", False),
-        "errorCategory": mcp_result.get("errorCategory"),
-        "isRetryable": mcp_result.get("isRetryable"),
-    }
-
 def serialize_for_model(envelope: Dict[str, Any]) -> str:
     """Serialize the envelope dict to JSON for the model."""
     # Include only the essential fields for the model
