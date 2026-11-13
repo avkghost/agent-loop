@@ -19,6 +19,9 @@ class FakeResponse:
     def iter_lines(self):
         return iter(self._lines)
 
+    def close(self):
+        return None
+
 
 def make_streamed_response(finish_reason="stop", content=None, tool_calls=None):
     delta = {}

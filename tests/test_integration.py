@@ -41,6 +41,9 @@ class FakeStream:
     def iter_lines(self):
         return iter(self._lines)
 
+    def close(self):
+        return None
+
 
 def scripted_post(replies, summary_fails=True):
     """requests.post replacement: model replies come from `replies`; summarizer calls (no tools) fail."""

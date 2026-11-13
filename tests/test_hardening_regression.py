@@ -49,6 +49,9 @@ class CrashingResponse:
     def iter_lines(self):
         raise SimulatedCrash("killed while waiting for the model reply")
 
+    def close(self):
+        return None
+
 
 def _call(call_id, name="list_directory", path="."):
     return {"id": call_id, "name": name, "arguments": json.dumps({"path": path})}

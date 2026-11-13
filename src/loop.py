@@ -7,7 +7,7 @@ import requests
 from pathlib import Path
 from typing import Optional
 
-from . import config, envelope, prompts, dispatch, render, compaction, session, execution, jobs
+from . import config, envelope, prompts, dispatch, render, compaction, session, execution, jobs, stream
 from .tools import get_all_tools
 from .tools.mcp_client import MCPClientManager
 
@@ -301,10 +301,10 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
             "stream": True  # Enable streaming
         }
 
-        # Try with retries on timeout
+        # Try with retries on timeout. A turn is complete only if its stream says so (see src/stream.py).
+        # Retries happen only before the turn's tool calls are dispatched, which is always the case here.
         result = None
         last_error = None
-        full_content = ""
 
         for attempt in range(1 + config.LM_STUDIO_RETRIES):
             try:
@@ -320,71 +320,36 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                     timeout=(config.LM_STUDIO_CONNECT_TIMEOUT, config.LM_STUDIO_TIMEOUT),
                     stream=True
                 )
-                response.raise_for_status()
-
-                # Stream the response line by line
-                print("\n🤖 Assistant: ", end="", flush=True)
-                full_content = ""
-                tool_calls_dict = {}  # Merge tool_calls by index
-                finish_reason = "stop"
-
-                for line in response.iter_lines():
-                    if line:
-                        line = line.decode('utf-8') if isinstance(line, bytes) else line
-                        if line.startswith("data: "):
-                            chunk_str = line[6:]  # Remove "data: " prefix
-                            if chunk_str == "[DONE]":
-                                break
-                            try:
-                                chunk = json.loads(chunk_str)
-                                # Extract content and tool_calls from streaming response
-                                if "choices" in chunk and chunk["choices"]:
-                                    choice = chunk["choices"][0]
-                                    if "delta" in choice:
-                                        delta = choice["delta"]
-                                        if "content" in delta and delta["content"]:
-                                            content = delta["content"]
-                                            full_content += content
-                                            print(content, end="", flush=True)
-                                        if "tool_calls" in delta and delta["tool_calls"]:
-                                            for tc in delta["tool_calls"]:
-                                                idx = tc.get("index", 0)
-                                                if idx not in tool_calls_dict:
-                                                    tool_calls_dict[idx] = tc
-                                                else:
-                                                    # Merge delta with existing tool_call
-                                                    existing = tool_calls_dict[idx]
-                                                    if "function" in tc and "function" in existing:
-                                                        if "arguments" in tc["function"]:
-                                                            existing["function"]["arguments"] += tc["function"]["arguments"]
-                                    if "finish_reason" in choice and choice["finish_reason"]:
-                                        finish_reason = choice["finish_reason"]
-                            except json.JSONDecodeError:
-                                continue
+                try:
+                    response.raise_for_status()
+                    print("\n🤖 Assistant: ", end="", flush=True)
+                    parsed = stream.parse_events(
+                        response.iter_lines(), on_text=lambda text: print(text, end="", flush=True))
+                finally:
+                    response.close()
 
                 print()  # New line after streaming completes
-
-                # Convert tool_calls dict back to list, sorted by index
-                tool_calls = [tool_calls_dict[idx] for idx in sorted(tool_calls_dict.keys())]
-
-                # Build result object with both content and tool_calls
-                message = {"content": full_content}
-                if tool_calls:
-                    message["tool_calls"] = tool_calls
-
-                result = {
-                    "choices": [{
-                        "message": message,
-                        "finish_reason": finish_reason
-                    }]
-                }
-                break  # Success, exit retry loop
+                result = stream.to_completion(parsed)
+                break  # Complete, well-formed turn
 
             except requests.exceptions.Timeout as e:
                 last_error = e
                 if attempt == config.LM_STUDIO_RETRIES:
                     render.print_llm_error(f"LM Studio timeout after {attempt + 1} attempts: {str(e)}")
                     break
+            except stream.StreamError as e:
+                # Incomplete or malformed: the turn is discarded, nothing is appended, and nothing is dispatched
+                last_error = e
+                render.print_llm_error(
+                    f"Model stream {e.category}: {e}. The turn was discarded and no tool was run. "
+                    "The run stops without claiming completion.")
+                break
+            except requests.exceptions.RequestException as e:
+                # Transport failure, including a connection that drops mid-stream
+                last_error = e
+                render.print_llm_error(
+                    f"Transport error during the model stream: {e}. The turn was discarded and no tool was run.")
+                break
             except Exception as e:
                 last_error = e
                 render.print_llm_error(str(e))
@@ -401,6 +366,13 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
         choice = result["choices"][0]
         finish_reason = choice.get("finish_reason")
         message = choice.get("message", {})
+
+        if finish_reason == stream.FINISH_LENGTH:
+            # Complete on the wire but cut off by the length limit: not a finished answer, so it is not kept
+            render.print_llm_error(
+                "Model response was cut off by the length limit (finish_reason=length). The turn was discarded "
+                "and no tool was run. The run stops without claiming completion.")
+            break
 
         if message.get("tool_calls"):
             valid_calls, call_error = _validate_tool_call_batch(message["tool_calls"], journal)
