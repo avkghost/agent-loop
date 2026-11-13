@@ -32,3 +32,4 @@ node-compile-cache/
 
 # Backups
 *.bak
+.venv
