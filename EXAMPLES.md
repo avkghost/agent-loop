@@ -7,7 +7,8 @@ Quick reference with real-world scenarios and copy-paste examples.
 Before running any examples, ensure you have:
 - Python 3.8+ installed
 - Node.js 14+ and npm installed (for MCP servers)
-- Python packages: `pip install -r requirements.txt`
+- Runtime Python packages: `pip install -r requirements/base.txt`
+- Development and test packages: `pip install -r requirements/dev.txt`
 - LM Studio running with a model loaded
 
 ## Quick Start

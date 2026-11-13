@@ -1,5 +1,1 @@
-requests
-mcp
-rich
-tiktoken
-pyyaml
+-r requirements/base.txt

@@ -182,8 +182,11 @@ python3 --version  # 3.8+
 node --version     # 14+ (required for MCP servers)
 npm --version      # 6+
 
-# Install Python packages
-pip install -r requirements.txt
+# Install runtime Python packages
+pip install -r requirements/base.txt
+
+# Install development and test packages when contributing
+pip install -r requirements/dev.txt
 
 # Pre-download MCP servers (optional, improves first-run performance)
 npx -y @upstash/context7-mcp --help >/dev/null
@@ -279,7 +282,10 @@ agent-loop/
 ├── EXAMPLES.md            # Detailed usage scenarios
 ├── REFERENCE.md           # This file (quick reference)
 ├── agent_loop.py          # Entry point (delegates to src/)
-├── requirements.txt       # Dependencies
+├── requirements/          # Runtime and development dependencies
+│   ├── base.txt           # Runtime dependencies
+│   └── dev.txt            # Development and test dependencies
+├── requirements.txt       # Backward-compatible runtime shim
 ├── mcp_servers.json       # MCP configuration
 ├── AGENTS.md             # Project rules (create if needed)
 ├── src/

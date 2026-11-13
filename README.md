@@ -38,6 +38,10 @@ agent-loop/
 ├── agents/               # Predefined agent personas (.md files)
 ├── skills/               # Capability packages (.md files)
 ├── commands/             # Custom CLI commands
+├── requirements/         # Runtime and development dependencies
+│   ├── base.txt          # Runtime dependencies
+│   └── dev.txt           # Development and test dependencies
+├── requirements.txt      # Backward-compatible runtime shim
 ├── tests/                # Test suite
 ├── mcp_servers.json      # MCP server configuration
 └── AGENTS.md             # Project-specific rules
@@ -100,8 +104,11 @@ npm --version      # Should be 6+
 git clone https://github.com/avkghost/agent-loop.git
 cd agent-loop
 
-# Install Python dependencies
-pip install -r requirements.txt
+# Install runtime Python dependencies
+pip install -r requirements/base.txt
+
+# For development and tests, install the development requirements instead
+pip install -r requirements/dev.txt
 
 # Optional npm-based MCP server setup is described below
 
@@ -133,12 +140,17 @@ npx -y @upstash/context7-mcp --version 2>/dev/null && echo "✅ MCP servers OK"
 
 ### Dependencies
 
-**Python Packages** (`requirements.txt`):
+**Runtime Python Packages** (`requirements/base.txt`):
 - `requests` — HTTP client for LLM API calls
 - `mcp` — Model Context Protocol library  
 - `tiktoken` — Token counting for OpenAI models
 - `pyyaml` — YAML parsing for agent/skill definitions
 - `rich` — Terminal formatting
+
+**Development Python Packages** (`requirements/dev.txt`):
+- `pytest` — Test runner
+
+The root `requirements.txt` remains as a compatibility shim that includes `requirements/base.txt`.
 
 **Node.js Packages** (MCP servers, auto-installed):
 - `@upstash/context7-mcp` — Context indexing & search
@@ -547,6 +559,12 @@ After compaction:  6 messages (24,576 tokens) + summary
 **Solution:** Check `COMPACT_THRESHOLD` (default 0.8 = 80%); lower it to trigger sooner
 
 ## Testing
+
+Install development dependencies before running the test suite:
+
+```bash
+pip install -r requirements/dev.txt
+```
 
 ```bash
 # Run test suite
