@@ -77,6 +77,8 @@ def validate_result_session(summary: dict, session_doc: dict, scenario: str) -> 
     has already validated the SESSION with the production validator. Both frames come from the same untrusted
     container, so this detects contradictions; it does not prove either frame."""
     problems = []
+    if summary.get("scenario") != scenario:
+        problems.append(f"RESULT scenario {summary.get('scenario')!r} is not {scenario!r}")
     if session_doc.get("session_id") != f"rme1-{scenario}":
         problems.append(f"SESSION id {session_doc.get('session_id')!r} is not rme1-{scenario}")
     runs = session_doc.get("runs") or []
@@ -348,6 +350,12 @@ def main():
     parser.add_argument("--scenario", default="RME-01")
     parser.add_argument("--probe-only", action="store_true")
     args = parser.parse_args()
+    if args.scenario not in SCENARIOS:
+        raise SystemExit(f"unknown scenario {args.scenario!r}; registered: {sorted(SCENARIOS)}")
+    if args.scenario != "RME-01" and not args.trial.startswith(args.scenario + "-"):
+        # Artifact paths are scenario-specific: a trial of any other scenario is named after it, so no two scenarios
+        # can write the same directory. RME-01 keeps its historical trial names.
+        raise SystemExit(f"a {args.scenario} trial must be named {args.scenario}-<label>, not {args.trial!r}")
     if args.policy not in policy.POLICY_IDS:
         raise SystemExit(f"unknown policy {args.policy!r}")
     if args.policy == policy.POLICY_V2 and not args.expected_revision:
@@ -425,6 +433,7 @@ def main():
     evaluator = run_hidden_check(scenario, workspace, evaluator_dir)
     after = tree_digest(workspace)
     unchanged = protected_unchanged(scenario, workspace, fixture["initial_hashes"])
+    evaluator["scenario"] = scenario.scenario_id  # the evaluator record names the scenario it judged
     record.update({"independent_evaluator": evaluator, "protected_files_unchanged": unchanged,
                    "evaluator_modified_workspace": before != after})
 

@@ -191,8 +191,8 @@ def _session(status, runs=True, verification=None, sid="rme1-RME-01"):
 
 
 def test_consistent_result_and_session_are_accepted():
-    assert supervisor.validate_result_session({"run_status": "interrupted"}, _session("interrupted"), "RME-01") == []
-    assert supervisor.validate_result_session({"run_status": "blocked"}, _session("blocked"), "RME-01") == []
+    assert supervisor.validate_result_session({"run_status": "interrupted", "scenario": "RME-01"}, _session("interrupted"), "RME-01") == []
+    assert supervisor.validate_result_session({"run_status": "blocked", "scenario": "RME-01"}, _session("blocked"), "RME-01") == []
     assert supervisor.terminal_session_problems({"run_status": "blocked"}, "MISSING", None, "RME-01"), \
         "an absent SESSION for a terminal outcome is a problem, never a fabricated pass"
 

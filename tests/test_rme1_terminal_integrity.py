@@ -49,6 +49,8 @@ def _summary(run_status, reason="recorded", scenario="RME-01", deadline_signalle
 
 def _classify(summary, session_doc, *, session_status="OK", scenario="RME-01", status="OK", timed_out=False,
               graceful=None, evaluator=False):
+    if isinstance(summary, dict):
+        summary = dict(summary, scenario=scenario)  # a RESULT always names the scenario it was produced for
     return supervisor.classify_trial(status=status, detail="", summary=summary, timed_out=timed_out,
                                      graceful=graceful, session_status=session_status, session_doc=session_doc,
                                      scenario=scenario, model=MODEL, policy_id=V2, evaluator_passed=evaluator)

@@ -15,6 +15,7 @@ RUN pip install --no-cache-dir -r /opt/req/base.txt
 
 COPY src /opt/agent-loop/src
 COPY evaluation/rme1/scenarios.py evaluation/rme1/runner.py evaluation/rme1/probe.py evaluation/rme1/metrics.py evaluation/rme1/policy.py evaluation/rme1/egress-init.sh /opt/agent-loop/evaluation/rme1/
+COPY evaluation/rme_debug/spec.py /opt/agent-loop/evaluation/rme_debug/spec.py
 
 # Root-owned and not writable by the agent user
 RUN chmod -R a-w /opt/agent-loop && find /opt/agent-loop -type d -exec chmod 755 {} + \

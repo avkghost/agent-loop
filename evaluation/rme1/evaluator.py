@@ -53,7 +53,9 @@ def write_hidden_check(scenario: Scenario, evaluator_dir: Path) -> Path:
     """The hidden check lives outside every workspace."""
     evaluator_dir.mkdir(parents=True, exist_ok=True)
     path = evaluator_dir / scenario.hidden_check
-    path.write_text(HIDDEN_CHECKS[scenario.hidden_check])
+    # An external hidden evaluator is copied from its host-only source; built-in checks come from HIDDEN_CHECKS.
+    source = Path(scenario.hidden_source).read_text() if scenario.hidden_source else HIDDEN_CHECKS[scenario.hidden_check]
+    path.write_text(source)
     return path
 
 

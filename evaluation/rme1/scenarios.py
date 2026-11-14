@@ -4,7 +4,7 @@ Hidden evaluator checks are NOT here; see evaluator.py (host only)."""
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULT_BYTES_LIMIT = 64 * 1024
@@ -24,6 +24,8 @@ class Scenario:
     protected: List[str]                    # files the model must not change (hashed before the trial)
     criteria: List[Dict[str, Any]]          # trusted criteria, as plain data for AcceptanceCriterion
     hidden_check: str                       # evaluator script file name, kept OUTSIDE the workspace
+    fixture_root: Optional[str] = None      # host-only directory the fixture is copied from (when fixtures is empty)
+    hidden_source: Optional[str] = None     # host-only path of an external hidden evaluator (when not built in)
 
 
 SCENARIOS: Dict[str, Scenario] = {
@@ -104,6 +106,34 @@ SCENARIOS: Dict[str, Scenario] = {
     ),
 }
 
+# RME-DEBUG-01 is defined in evaluation/rme_debug/spec.py (pure data, importable in the agent image). Its fixture and
+# hidden evaluator are host-only files, referenced by path and never read here. RME-01/02/03 above are unchanged.
+_DEBUG_DIR = Path(__file__).resolve().parents[1] / "rme_debug"
+
+
+def _load_debug_spec():
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("rme_debug_spec", _DEBUG_DIR / "spec.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+_debug = _load_debug_spec()
+SCENARIOS[_debug.SCENARIO_ID] = Scenario(
+    fixtures={}, fixture_root=str(_DEBUG_DIR / _debug.ASSET_DIR), hidden_source=str(_DEBUG_DIR / _debug.HIDDEN_FILE),
+    **_debug.KWARGS)
+
+
+def scenario_fixtures(scenario: Scenario) -> Dict[str, str]:
+    """The agent-visible files for a scenario: the literal fixtures, or every file under fixture_root (host only)."""
+    if scenario.fixtures or not scenario.fixture_root:
+        return dict(scenario.fixtures)
+    root = Path(scenario.fixture_root)
+    return {str(path.relative_to(root)): path.read_text()
+            for path in sorted(root.rglob("*")) if path.is_file() and "__pycache__" not in path.parts}
+
+
 # Hidden evaluator checks. These run from the harness, after the trial, against the workspace. The model never sees them.
 
 
@@ -122,11 +152,12 @@ def make_workspace(scenario: Scenario, root: Path, trial_id: str) -> Dict[str, A
     if workspace.exists():
         raise FileExistsError(f"workspace already exists: {workspace}")
     workspace.mkdir(parents=True)
-    for rel, content in scenario.fixtures.items():
+    fixtures = scenario_fixtures(scenario)
+    for rel, content in fixtures.items():
         target = workspace / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(content)
-    initial = {rel: file_hash(workspace / rel) for rel in scenario.fixtures}
+    initial = {rel: file_hash(workspace / rel) for rel in fixtures}
     return {"workspace": str(workspace), "initial_hashes": initial}
 
 
