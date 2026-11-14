@@ -334,3 +334,17 @@ A: Use `python3 agent_loop.py sessions` to list, then `resume <id>`.
 - **Agent Definitions:** `agents/*.md`
 - **Skill Definitions:** `skills/*.md`
 - **Configuration:** `src/config.py`
+
+## Built-in tools: registry and dispatch
+
+Built-in tools are declared per family, and `src/tools/registry.py` holds the descriptors:
+
+- **Schemas.** Provider-visible schemas are literals in `src/tools/__init__.py`: `get_job_tools()` for the managed-job tools and `_core_tool_schemas()` for `run_command`, `write_file`, `read_file`, and `list_directory`. `local_registry()` builds the immutable registry from them in that order, and `get_local_tools()` returns copies. `tests/fixtures/provider_schemas.json` is the golden snapshot; a deliberate schema change must update it.
+- **Routing kinds.** Each registered name has one kind: `file`, `shell` (only `run_command`), or `job`. Names with the `mcp_` prefix route to MCP and are never registered locally. Local names may not use that prefix.
+- **Dispatch.** `src/dispatch.py` selects a route from the kind, then the handler for each name. An unregistered name is rejected with an "Unknown tool" result before any handler runs. Authorization checks run before execution in every route; the registry grants nothing.
+
+**Adding a built-in tool** takes two edits for a `file` tool: add its schema to `_core_tool_schemas()` (or `get_job_tools()` for a job tool), and add its handler branch in `dispatch_tool`. A new routing kind also needs its kind assigned in `local_registry()` and a route in `dispatch_tool_async`. The shell and job routes are fixed to `run_command` and the job tools. The test `test_every_registered_name_has_a_dispatch_handler` fails if a registered name has no handler.
+
+**Authorization boundary.** Permissions are not declared in the registry. Shell commands are checked by the shell validator, managed jobs by the job start path, MCP tools by the MCP gate, and verification commands by the same shell path. File tools are limited to the working directory, not approved per call.
+
+**Current limitations.** Handlers are not stored on descriptors; dispatch selects them by name. MCP tools are discovered from servers at runtime and are not individually registered. The registry is process-wide and immutable after first use; it holds no session state.

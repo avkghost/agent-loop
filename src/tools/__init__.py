@@ -1,5 +1,7 @@
 """Tool definitions and schemas."""
 
+from .registry import FILE, JOB, SHELL, ToolDescriptor, ToolRegistry
+
 def get_job_tools() -> list:
     """Schemas for managed background jobs. Inputs are validated by src/jobs.py."""
     return [
@@ -94,9 +96,9 @@ Returns: JSON with the resulting state. terminated means the process group was c
     ]
 
 
-def get_local_tools() -> list:
-    """Return the OpenAI-format schemas for local tools."""
-    return get_job_tools() + [
+def _core_tool_schemas() -> list:
+    """Schemas for the built-in shell and file tools, in provider order."""
+    return [
         {
             "type": "function",
             "function": {
@@ -243,6 +245,31 @@ Boundaries: DO NOT use this for very large directories (1000+ entries) — use r
             }
         }
     ]
+
+_LOCAL_REGISTRY = None
+
+
+def local_registry() -> ToolRegistry:
+    """The finalized registry of local tools, built on first use from the schema builders and immutable after.
+
+    Registration order is the provider order: managed-job tools, then the core shell and file tools.
+    """
+    global _LOCAL_REGISTRY
+    if _LOCAL_REGISTRY is None:
+        registry = ToolRegistry()
+        for schema in get_job_tools():
+            registry.register(ToolDescriptor(schema["function"]["name"], JOB, schema))
+        for schema in _core_tool_schemas():
+            name = schema["function"]["name"]
+            registry.register(ToolDescriptor(name, SHELL if name == "run_command" else FILE, schema))
+        _LOCAL_REGISTRY = registry.finalize()
+    return _LOCAL_REGISTRY
+
+
+def get_local_tools() -> list:
+    """Return the OpenAI-format schemas for local tools, in registry order."""
+    return local_registry().schemas()
+
 
 def get_all_tools(mcp_client=None) -> list:
     """Return combined local + MCP tools in OpenAI format."""
