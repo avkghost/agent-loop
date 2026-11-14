@@ -120,13 +120,14 @@ def _answer_interrupted_calls(messages):
 
 
 def _grant_kind(kind: str) -> str:
-    """Map a permission request kind to the session authorization kind."""
-    return {"command": "command", "shell_command": "shell", "mcp_tool": "mcp"}[kind]
+    """Map a permission request kind to the grant kind an interactive approval creates. A plain command is
+    approved by its exact text, never by its base name."""
+    return {"command": "command_exact", "shell_command": "shell", "mcp_tool": "mcp"}[kind]
 
 
 def _grant_identifier(kind: str, identifier: str, observation: dict) -> str:
-    """Shell grants are the exact command text; command and MCP grants are the tool name."""
-    if kind == "shell_command":
+    """Command and shell grants are the exact command text; MCP grants are the tool name."""
+    if kind in ("command", "shell_command"):
         return observation.get("command", "")
     return identifier
 
@@ -571,9 +572,16 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                             render.print_permission_result("✅ Allowed for this use only.")
                             # Re-execute without permission gate
                             if kind in ["command", "shell_command", "mcp_tool"]:
-                                # One attempt only: the grant is consumed by the re-dispatch
-                                authorization.grant_once(_grant_kind(kind), _grant_identifier(kind, identifier, observation))
-                                observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override, authorization)
+                                # One attempt only. The re-dispatch consumes the grant. If the attempt never
+                                # reaches that check (validation failure, error, or cancellation), the grant
+                                # is discarded here so it cannot approve a later call.
+                                once_kind = _grant_kind(kind)
+                                once_id = _grant_identifier(kind, identifier, observation)
+                                authorization.grant_once(once_kind, once_id)
+                                try:
+                                    observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override, authorization)
+                                finally:
+                                    authorization.discard_once(once_kind, once_id)
                             # Convert envelope dict to JSON string for the model
                             if isinstance(observation, dict) and "isError" in observation:
                                 observation_str = envelope.serialize_for_model(observation)

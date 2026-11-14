@@ -116,7 +116,7 @@ def list_directory_safe(path_str: str) -> Dict[str, Any]:
         )
 
 
-def write_file_safe(path_str: str, content: str) -> Dict[str, Any]:
+def write_file_safe(path_str: str, content: str, searched: bool = False) -> Dict[str, Any]:
     """Write UTF-8 text inside the working directory without ever truncating the target first.
 
     Outcome classification:
@@ -147,7 +147,7 @@ def write_file_safe(path_str: str, content: str) -> Dict[str, Any]:
 
         # Soft nudge: warn if creating a new file without searching first
         warning = ""
-        if not target.exists() and not config.HAS_SEARCHED_CODEBASE:
+        if not target.exists() and not searched:
             warning = "⚠️ Note: No codebase search (grep/rg/find) was run this session before creating this file. Consider checking for existing implementations first.\n"
 
         target.parent.mkdir(parents=True, exist_ok=True)

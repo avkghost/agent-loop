@@ -79,7 +79,7 @@ python3 agent_loop.py repl
 # Enter multiple goals, each building on the previous
 ```
 
-All goals entered in one `repl` run share one session. Background jobs started by a goal keep running for later goals in that session. Leaving the REPL closes the session and stops its jobs. Approvals given with "Yes, this session" last for that session only.
+All goals entered in one `repl` run share one session. Background jobs started by a goal keep running for later goals in that session. Leaving the REPL closes the session and stops its jobs. Approvals given with "Yes, this session" last for that session only. An unlisted command is approved by its exact text, and an MCP tool by its name. Codebase-search state is also session-local and is not saved.
 
 ### Targeted: Use agent expertise
 ```bash

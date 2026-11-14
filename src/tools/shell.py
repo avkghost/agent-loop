@@ -627,21 +627,21 @@ def validate_command(command_str: str, authorization: Optional[SessionAuthorizat
 
     base_cmd = tokens[0]
 
-    # Track if a codebase search command is being used
-    if base_cmd in config.SEARCH_COMMANDS:
-        config.HAS_SEARCHED_CODEBASE = True
-
-    # Check if command is allowed by this session's policy
-    if not authorization.allows("command", base_cmd):
+    # Check if command is allowed: the CLI policy by base name, or this session's exact-text approval
+    if not authorization.allows_command(base_cmd, command_str):
         # Return permission request sentinel (not an error envelope)
         return {
             "requiresPermission": True,
             "kind": "command",
             "identifier": base_cmd,
+            "command": command_str,
             "arguments": tokens[1:] if len(tokens) > 1 else []
         }, None, False
     if authorization.allow_all and base_cmd not in config.ALLOWED_TOOLS:
         print(f"⚠️ ALLOW_ALL MODE: Executing unauthorized command: {base_cmd}")
+    if base_cmd in config.SEARCH_COMMANDS:
+        # Counted only once the command is allowed to start, never for a request that was refused
+        authorization.note_search()
     return None, tokens, False
 
 

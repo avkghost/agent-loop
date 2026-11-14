@@ -145,7 +145,8 @@ def dispatch_tool(tool_name: str, tool_input: Dict[str, Any], mcp_client: Option
                 fixable=False
             )
 
-        return files.write_file_safe(path, content)
+        searched = authorization is not None and authorization.has_searched
+        return files.write_file_safe(path, content, searched=searched)
 
     # Handle MCP tools
     elif tool_name in jobs.TOOL_NAMES:

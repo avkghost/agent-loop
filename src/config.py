@@ -46,6 +46,5 @@ JOB_SHUTDOWN_TIMEOUT_SECONDS = 30      # runtime shutdown budget for stopping al
 # CLI flags
 ALLOW_ALL = False  # Set by main.py based on --allow flag
 
-# Search tracking for implementation-check nudging
+# Commands that count as a codebase search. Whether a session has searched is session state (authorization.py).
 SEARCH_COMMANDS = {"grep", "rg", "find"}
-HAS_SEARCHED_CODEBASE = False

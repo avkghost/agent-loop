@@ -262,7 +262,7 @@ def test_concurrent_goal_in_same_session_is_refused(runtimes, script, tmp_sessio
 def test_run_cancellation_interrupts_the_run_and_keeps_session_usable(runtimes, script, tmp_sessions, monkeypatch):
     rt = runtimes()
     sess = rt.open_session("cancel")
-    sess.authorization.grant("command", "true")  # a grant made before the cancellation
+    sess.authorization.grant("command_exact", "true")  # an interactive grant made before the cancellation
 
     script([asyncio.CancelledError, _stop("after cancel")])
     with pytest.raises(asyncio.CancelledError):
@@ -270,7 +270,7 @@ def test_run_cancellation_interrupts_the_run_and_keeps_session_usable(runtimes, 
 
     assert sess.closed is False
     assert [r["status"] for r in _saved("cancel")["runs"]] == ["interrupted"]
-    assert "true" in sess.authorization.snapshot()["command"], "cancellation must not reset grants"
+    assert "true" in sess.authorization.snapshot()["command_exact"], "cancellation must not reset grants"
 
     _run(rt, sess.run_goal("next goal"))
     saved = _saved("cancel")
@@ -352,8 +352,8 @@ def test_grants_are_session_local_and_survive_runs_of_one_session(runtimes, scri
     script([_tool_turn("run_command", {"command": "true"}, "g3"), _stop("tried")])
     _run(rt, b.run_goal("session B runs true"))
     assert "Command/tool denied" in _tool_content(_saved("grants-b")["messages"], "g3")
-    assert "true" not in b.authorization.snapshot()["command"]
-    assert "true" in a.authorization.snapshot()["command"]
+    assert "true" not in b.authorization.snapshot()["command_exact"]
+    assert "true" in a.authorization.snapshot()["command_exact"]
 
 
 def test_shell_operator_approval_is_exact_and_one_time_when_asked_once(runtimes, script, tmp_sessions, monkeypatch):
@@ -375,9 +375,9 @@ def test_shell_operator_approval_is_exact_and_one_time_when_asked_once(runtimes,
 def test_from_config_snapshot_does_not_share_grants(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "ALLOW_ALL", False)
     auth = SessionAuthorization.from_config()
-    auth.grant("command", "uname")
+    auth.grant("command_exact", "uname")
     assert SessionAuthorization.from_config().allows("command", "uname") is False
-    assert auth.allows("command", "uname") is True
+    assert auth.allows_command("uname", "uname") is True
 
 
 def test_legacy_session_resumes_in_a_live_session(runtimes, script, tmp_sessions):

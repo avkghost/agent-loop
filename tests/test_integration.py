@@ -77,12 +77,11 @@ class TestIntegrationAgentLoop:
 
     def setup_method(self):
         """Reset state before each test, remembering the globals so teardown can restore them."""
-        self._saved = (config.ALLOWED_TOOLS, config.HAS_SEARCHED_CODEBASE)
+        self._saved = (config.ALLOWED_TOOLS,)
         config.ALLOWED_TOOLS = {"ls", "grep", "find"}
-        config.HAS_SEARCHED_CODEBASE = False
 
     def teardown_method(self):
-        config.ALLOWED_TOOLS, config.HAS_SEARCHED_CODEBASE = self._saved
+        (config.ALLOWED_TOOLS,) = self._saved
 
     def mock_lm_studio_response(self, finish_reason: str, content: str = None, tool_calls: list = None):
         """Create a mock LM Studio response (chat-completions shape)."""
