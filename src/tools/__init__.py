@@ -1,6 +1,6 @@
 """Tool definitions and schemas."""
 
-from .registry import FILE, JOB, SHELL, ToolDescriptor, ToolRegistry
+from .registry import FILE, GIT, JOB, SHELL, ToolDescriptor, ToolRegistry
 
 def get_job_tools() -> list:
     """Schemas for managed background jobs. Inputs are validated by src/jobs.py."""
@@ -243,10 +243,113 @@ Boundaries: DO NOT use this for very large directories (1000+ entries) — use r
                     "required": ["path"]
                 }
             }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "edit_file",
+                "description": """Replace one exact occurrence of old_string with new_string in an existing file in the working directory.
+
+Purpose: Make a targeted change to an existing file without rewriting it. Use write_file to create a file or to replace its whole content.
+
+Inputs:
+- path (string): File path relative to working directory (must resolve inside it; symbolic links are refused).
+- old_string (string): Exact text to replace. Read the file first and copy the text exactly, including indentation and line breaks. It must occur exactly once.
+- new_string (string): Replacement text. Use an empty string to delete old_string.
+
+Edge cases & limitations:
+- A missing or ambiguous match is refused and changes nothing. Add surrounding lines to make old_string unique.
+- The file must exist, be a regular UTF-8 text file of at most 1 MiB, and not be hard-linked. Line endings and byte-order marks are kept as stored; for CRLF files, old_string must include \\r\\n.
+- A refused edit leaves the file unchanged. Permission bits are kept.
+- The result reports the line that changed, not the full diff. Use git_diff to review the change.
+
+Boundaries: DO NOT use this to create a file or to rewrite a whole file (use write_file). Each call changes one occurrence.""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "File path relative to working directory"
+                        },
+                        "old_string": {
+                            "type": "string",
+                            "description": "Exact text to replace; must occur exactly once in the file"
+                        },
+                        "new_string": {
+                            "type": "string",
+                            "description": "Replacement text (may be empty)"
+                        }
+                    },
+                    "required": ["path", "old_string", "new_string"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_status",
+                "description": """Show the Git status of the working directory's repository (read-only).
+
+Purpose: See which files are modified, staged, untracked or conflicted, for example before and after edits.
+
+Inputs: none.
+
+Returns: the current branch, then one line per change: a two-character status (index, then worktree) and the path. "Working tree clean." when nothing has changed.
+
+Edge cases & limitations:
+- Works only when the working directory is the top level of a Git repository. Otherwise it reports that and changes nothing.
+- Read-only: it never stages, commits, resets, restores or cleans anything.
+- Output is limited to 64 KiB, and a note says when the listing is incomplete. Each run is limited to 10 seconds.
+- No Git options are accepted here. Other Git commands go through run_command, which asks for approval first.""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {},
+                    "required": []
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "git_diff",
+                "description": """Show the diff of the working directory's repository against its last commit (read-only).
+
+Purpose: Review what has changed, for example after edit_file or write_file.
+
+Inputs:
+- path (string, optional): Limit the diff to one file or directory relative to the working directory. Omit it for the whole repository.
+
+Returns: a header naming the comparison base, then a unified diff. "No differences." when nothing has changed.
+
+Edge cases & limitations:
+- Compares the working tree with HEAD, so staged and unstaged changes are both shown. Before the first commit it compares with the index, and staged changes are not shown.
+- Untracked files (never added to Git) are not included. git_status lists them.
+- External diff and textconv helpers are disabled. Binary files are reported as differing, without content.
+- Output is limited to 64 KiB, and a note says when the diff is incomplete. Each run is limited to 10 seconds.
+- Read-only. The only accepted argument is the optional path; any other argument is refused.""",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "path": {
+                            "type": "string",
+                            "description": "Optional file or directory relative to working directory"
+                        }
+                    },
+                    "required": []
+                }
+            }
         }
     ]
 
 _LOCAL_REGISTRY = None
+
+
+def _core_kind(name: str) -> str:
+    if name == "run_command":
+        return SHELL
+    if name in ("git_status", "git_diff"):
+        return GIT
+    return FILE
 
 
 def local_registry() -> ToolRegistry:
@@ -261,7 +364,7 @@ def local_registry() -> ToolRegistry:
             registry.register(ToolDescriptor(schema["function"]["name"], JOB, schema))
         for schema in _core_tool_schemas():
             name = schema["function"]["name"]
-            registry.register(ToolDescriptor(name, SHELL if name == "run_command" else FILE, schema))
+            registry.register(ToolDescriptor(name, _core_kind(name), schema))
         _LOCAL_REGISTRY = registry.finalize()
     return _LOCAL_REGISTRY
 

@@ -60,19 +60,33 @@ interpreted as UTC on the host.
 
 ## RME-01 policy versions (evaluation infrastructure only)
 
+Contract revision `RME-01-CONTRACT-R2` (`policy.CONTRACT_REVISION`). Results recorded under earlier contracts keep their
+original fields and are not relabelled. R2 replaces the earlier arrangement, in which `RME-01-POLICY-V1` advertised the
+full historical registry (including the managed-job tools) and `RME-01-POLICY-V2` advertised a fixed list of four.
+
 `--policy` is required by `supervisor.py` and sent to the runner as `RME_POLICY`. Nothing is implied.
-- `RME-01-POLICY-V1`: the historical configuration. The model receives the unmodified production system prompt.
+- `RME-01-POLICY-V1`: the production system prompt, unmodified.
 - `RME-01-POLICY-V2`: the production prompt with nine exact, count-checked replacements that remove the examples of
   unauthorized shell commands (`find`, `grep`, `rg`, pipelines, `make`, background jobs), plus an appended
   authorization block that lists the only authorized basenames (`python3`, `ls`, `cat`) and directs discovery to
-  `list_directory` and `read_file`. See `policy.py`.
+  `list_directory` and `read_file`. Its advertised tools also have corrected descriptions.
 
-Both policies keep the goal, criteria, budgets, temperature, and the production tool authorization unchanged. The
-runner records the applied policy id, production and effective prompt hashes, the shell allowlist, and the tool
-schema hashes of every request; the supervisor classifies a mismatch as `INVALID_POLICY_MISMATCH`.
-Policy v2 also (1) overlays the provider-visible tools: managed-job tools are not advertised and six descriptions
-that advertised unauthorized commands are corrected (names and argument schemas kept); (2) guards dispatch: any tool
-outside the four advertised tools is rejected with the production permission envelope and never runs. Both overlays
-refuse to apply if the pinned production prompt or tool-schema hashes change. Policy v2 trials require
-`--expected-revision`; the image label and immutable image ID are recorded (traceability, not build provenance).
-`python evaluation/rme1/drill.py policy --image <ref> --expected-revision <rev>` is the non-LLM check of this path.
+Tools are a property of the scenario, not the policy. Each scenario declares the tools it allows
+(`scenarios.Scenario.tools`, currently `run_command`, `write_file`, `read_file`, `list_directory` for every RME-01
+scenario). Under either policy:
+- only the declared tools are advertised, in declared order, with their production schemas;
+- any other name, including managed-job, MCP and workspace tools that a scenario did not declare, is refused with the
+  permission envelope before it runs;
+- each declared tool's production schema must match its reviewed hash in `policy.REVIEWED_TOOL_SHA256`. A change to a
+  declared schema, or a declaration with no reviewed entry, refuses the policy. Changing a declared schema is therefore
+  a contract change: review it, update that table, and advance `CONTRACT_REVISION`. Production tools that no scenario
+  declares are not pinned, so unrelated changes to them do not block evaluation.
+
+The runner records the applied policy id, contract revision, source revision (`policy.source_fingerprint()`),
+production and effective prompt hashes, the shell allowlist, the advertised tool names, and the tool-schema hash of
+every request. The host recomputes the expected values from the scenario and the contract; a mismatch of any of them
+is `INVALID_POLICY_MISMATCH`. Policy v2 trials require `--expected-revision`; the image label and immutable image ID are
+recorded (traceability, not build provenance). `python evaluation/rme1/drill.py policy --image <ref> --expected-revision
+<rev>` is the non-LLM check of this path.
+
+The shell allowlist (`scenarios.TRIAL_TOOL_ALLOWLIST`) is not changed by any policy.

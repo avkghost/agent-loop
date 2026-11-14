@@ -1,15 +1,18 @@
-"""RME-01 evaluation policy versions. Evaluation infrastructure only. The production prompt, tool descriptions,
-ToolRegistry and dispatch authorization are never edited: every policy change is an in-process overlay applied
-by the trial runner, and each overlay fails closed if the production text it expects has changed.
+"""RME-01 evaluation policies under contract RME-01-CONTRACT-R2. Evaluation infrastructure only. The production prompt,
+tool schemas, ToolRegistry and dispatch authorization are never edited: each policy is an in-process overlay applied by
+the trial runner, and every overlay fails closed when the production text it depends on has changed.
 
-- RME-01-POLICY-V1: the historical configuration. The prompt, the tool schemas, and dispatch are unmodified.
-- RME-01-POLICY-V2: (a) the production prompt with exact replacements of passages that present unauthorized shell
-  commands as usable, plus an authorization block; (b) a provider-visible tool overlay: managed-job tools are not
-  advertised, and descriptions that advertise unauthorized commands are corrected; (c) a dispatch guard: any tool name
-  other than the advertised four is rejected with the production permission envelope before it can run.
+Tools. A scenario declares the tools it allows (scenarios.Scenario.tools). Only those are advertised, in declared order,
+and only those can run. Any other name is refused before execution, whether it is a managed-job, MCP, or workspace tool
+the scenario did not declare. Each declared tool must match its reviewed schema hash (REVIEWED_TOOL_SHA256); a change to
+a declared schema refuses every policy until it is reviewed. Production tools that no scenario declares are not pinned.
 
-Every expected production text is pinned by hash. A drift in the production prompt or tool schemas refuses v2.
-The shell allowlist is scenarios.TRIAL_TOOL_ALLOWLIST and is not changed by any policy.
+- RME-01-POLICY-V1: the production prompt, unmodified.
+- RME-01-POLICY-V2: the production prompt with exact replacements of passages that present unauthorized shell commands
+  as usable, an authorization block, and corrected descriptions of advertised tools.
+
+Both policies apply the same tool rules. The shell allowlist is scenarios.TRIAL_TOOL_ALLOWLIST and no policy changes it.
+Results recorded under an earlier contract keep their original fields and are not relabelled.
 """
 
 import copy
@@ -28,13 +31,23 @@ POLICY_V1 = "RME-01-POLICY-V1"
 POLICY_V2 = "RME-01-POLICY-V2"
 POLICY_IDS = (POLICY_V1, POLICY_V2)
 
-# Pinned production texts. Recomputed with sha256 over the exact strings (see tests).
+CONTRACT_REVISION = "RME-01-CONTRACT-R2"
+DISPATCH_GUARD = "scenario-allowlist"
+
+# Pinned production text. Recomputed with sha256 over the exact string (see tests).
 PRODUCTION_PROMPT_SHA256 = "0f12ffab50e903665207e37800c487c654b7b1a1ca107977ab8959b8ec12f60a"
-PRODUCTION_TOOLS_SHA256 = "d3097148d3a5b6a2e48fc28e4e4851324c22b8e00d5233abc93649ebd220e8f4"
 PROMPT_REPLACEMENT_COUNT = 9
 
-JOB_TOOLS = ("start_job", "status_job", "collect_job", "terminate_job")
-V2_ADVERTISED = ("run_command", "write_file", "read_file", "list_directory")
+# Reviewed schemas of the tools a scenario may expose: the sha256 of the canonical JSON of each production schema, before
+# any policy overlay. A scenario that declares a tool without an entry here, or whose production schema no longer matches,
+# is refused until the change is reviewed and this table is updated together with CONTRACT_REVISION. Tools that no scenario
+# declares are not pinned, so an unrelated production change does not block evaluation.
+REVIEWED_TOOL_SHA256: Dict[str, str] = {
+    "run_command": "fb6938504e7ba350a7ba69c40dadaa85695f16bfa02ce6f2df03bf2713d26c5a",
+    "write_file": "1b593861abc5497c2ebd24af5de17017342a5d1472c273b7363386160b5c1d33",
+    "read_file": "9fcde34368250a2987ad2768f1bb7ea690d792cc3c7a7e5931d64bdd686264bb",
+    "list_directory": "8ff96ce53876c48fe5cf314773728226d47f0afcbdf5065e161ceb9fac1d5c67",
+}
 
 
 class PolicyError(Exception):
@@ -59,6 +72,7 @@ def production_prompt() -> str:
 
 
 def production_tools() -> List[Dict[str, Any]]:
+    """The production registry, as it is (every tool, in registry order). Copies: callers may not change it."""
     return copy.deepcopy(_PRODUCTION_TOOLS)
 
 
@@ -171,59 +185,61 @@ def effective_prompt(policy_id: str) -> str:
     return _prompt_for(policy_id)
 
 
-def _check_source_tools(tools: List[Dict[str, Any]]) -> None:
-    if sha256(_canonical(tools)) != PRODUCTION_TOOLS_SHA256:
-        raise PolicyError("the production tool schemas changed; Policy v2 refuses to overlay them")
+def _declared(declared: Any) -> Tuple[str, ...]:
+    declared = tuple(declared)
+    if not declared:
+        raise PolicyError("a scenario must declare at least one tool")
+    if len(set(declared)) != len(declared):
+        raise PolicyError(f"a scenario declares a tool twice: {declared}")
+    unreviewed = [name for name in declared if name not in REVIEWED_TOOL_SHA256]
+    if unreviewed:
+        raise PolicyError(f"a scenario declares tools with no reviewed schema under contract {CONTRACT_REVISION}: "
+                          f"{unreviewed}")
+    return declared
 
 
-def overlay_tools(tools: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-    """Policy v2 provider-visible tools. Names, parameters and the argument schemas of advertised tools are kept;
-    only the descriptions listed in V2_TOOL_REPLACEMENTS change. Job tools are not advertised."""
-    _check_source_tools(tools)
-    out = []
-    for schema in copy.deepcopy(tools):
-        name = schema["function"]["name"]
-        if name not in V2_ADVERTISED:
+def _with_v2_descriptions(schema: Dict[str, Any]) -> Dict[str, Any]:
+    name = schema["function"]["name"]
+    description = schema["function"]["description"]
+    for tool, old, new in V2_TOOL_REPLACEMENTS:
+        if tool != name:
             continue
-        description = schema["function"]["description"]
-        for tool, old, new in V2_TOOL_REPLACEMENTS:
-            if tool != name:
-                continue
-            count = description.count(old)
-            if count != 1:
-                raise PolicyError(f"v2 tool replacement for {name} occurs {count} times (need exactly 1): {old[:60]!r}")
-            description = description.replace(old, new)
-        schema["function"]["description"] = description
-        out.append(schema)
-    if [s["function"]["name"] for s in out] != [n for n in V2_ADVERTISED]:
-        raise PolicyError("the advertised tool set does not match the Policy v2 list")
+        count = description.count(old)
+        if count != 1:
+            raise PolicyError(f"v2 tool replacement for {name} occurs {count} times (need exactly 1): {old[:60]!r}")
+        description = description.replace(old, new)
+    schema["function"]["description"] = description
+    return schema
+
+
+def advertised_tools(policy_id: str, declared: Any) -> List[Dict[str, Any]]:
+    """Provider-visible tools for a scenario under a policy: exactly the declared tools, in declared order, with their
+    production schemas. Policy v2 also applies the description replacements. Fails closed on any registry difference."""
+    if policy_id not in POLICY_IDS:
+        raise PolicyError(f"unknown policy {policy_id!r}; known: {POLICY_IDS}")
+    names = _declared(declared)
+    by_name = {schema["function"]["name"]: schema for schema in production_tools()}
+    out = []
+    for name in names:
+        if name not in by_name:
+            raise PolicyError(f"declared tool {name!r} is missing from the production registry")
+        if sha256(_canonical(by_name[name])) != REVIEWED_TOOL_SHA256[name]:
+            raise PolicyError(f"the production schema of {name} changed; contract {CONTRACT_REVISION} refuses to expose "
+                              "it until the change is reviewed")
+        schema = copy.deepcopy(by_name[name])
+        out.append(_with_v2_descriptions(schema) if policy_id == POLICY_V2 else schema)
     return out
 
 
-def _v2_tool_list() -> List[Dict[str, Any]]:
-    return overlay_tools(production_tools())
+_SOURCE_REVISION: Optional[str] = None
 
 
-def expected_metadata(policy_id: str) -> Dict[str, Any]:
-    """The values a v2 (or v1) trial must report. Computed from the production texts and the overlay rules on the
-    host, never read from a trial's own output. Used by the supervisor's independent validation."""
-    effective = _prompt_for(policy_id)
-    if policy_id == POLICY_V1:
-        tools = production_tools()
-        replacements, guard, advertised = 0, "none", sorted(s["function"]["name"] for s in tools)
-    else:
-        tools = _v2_tool_list()
-        replacements, guard, advertised = len(V2_REPLACEMENTS), "enforced", list(V2_ADVERTISED)
-    return {
-        "policy_id": policy_id,
-        "production_prompt_sha256": sha256(production_prompt()),
-        "effective_prompt_sha256": sha256(effective),
-        "replacements_applied": replacements,
-        "shell_allowlist": sorted(TRIAL_TOOL_ALLOWLIST),
-        "dispatch_guard": guard,
-        "advertised_tools": sorted(advertised),
-        "expected_tool_schema_sha256": sha256(_canonical(tools)),
-    }
+def source_revision() -> str:
+    """Fingerprint of the source the trial runs. Computed once per process; it changes whenever a covered file changes."""
+    global _SOURCE_REVISION
+    if _SOURCE_REVISION is None:
+        _SOURCE_REVISION = source_fingerprint()
+    return _SOURCE_REVISION
 
 
 def tool_schema_sha256(tools: Any) -> str:
@@ -231,10 +247,29 @@ def tool_schema_sha256(tools: Any) -> str:
     return sha256(_canonical(tools))
 
 
+def expected_metadata(policy_id: str, declared: Any) -> Dict[str, Any]:
+    """The values a trial under this policy and scenario must report. Computed on the host from the production texts,
+    the scenario's declared tools and the contract; never read from a trial's own output."""
+    effective = _prompt_for(policy_id)
+    tools = advertised_tools(policy_id, declared)
+    return {
+        "policy_id": policy_id,
+        "contract_revision": CONTRACT_REVISION,
+        "source_revision": source_revision(),
+        "production_prompt_sha256": sha256(production_prompt()),
+        "effective_prompt_sha256": sha256(effective),
+        "replacements_applied": len(V2_REPLACEMENTS) if policy_id == POLICY_V2 else 0,
+        "shell_allowlist": sorted(TRIAL_TOOL_ALLOWLIST),
+        "dispatch_guard": DISPATCH_GUARD,
+        "advertised_tools": [schema["function"]["name"] for schema in tools],
+        "expected_tool_schema_sha256": tool_schema_sha256(tools),
+    }
+
+
 def _rejection(name: str) -> Dict[str, Any]:
     return envelope.error_permission(
-        f"Tool '{name}' is not authorized under RME-01 Policy v2 (managed jobs and commands outside python3, ls, "
-        "cat are not part of this evaluation). It was not run.")
+        f"Tool '{name}' is not authorized for this scenario under RME-01 contract {CONTRACT_REVISION}. "
+        "Only the scenario's declared tools can run. It was not run.")
 
 
 _ORIGINALS: Dict[str, Any] = {}
@@ -251,25 +286,30 @@ def _original_targets() -> Dict[str, Any]:
     return _ORIGINALS
 
 
-def _apply_guard(enabled: bool) -> None:
+def _apply_guard(policy_id: Optional[str], declared: Any) -> None:
+    """Install the scenario's view of the tools: the advertised list, and a dispatch guard that refuses every other
+    name before the production handler runs. None restores the production originals."""
     orig = _original_targets()
     loop, dispatch = orig["loop"], orig["dispatch"]
-    if not enabled:
+    if policy_id is None:
         loop.get_all_tools = orig["get_all_tools"]
         dispatch.dispatch_tool_async = orig["dispatch_tool_async"]
         dispatch.dispatch_tool = orig["dispatch_tool"]
         return
 
+    tools = advertised_tools(policy_id, declared)
+    allowed = frozenset(schema["function"]["name"] for schema in tools)
+
     def guarded_get_all(*args, **kwargs):
-        return overlay_tools(orig["get_all_tools"](*args, **kwargs))
+        return copy.deepcopy(tools)
 
     async def guarded_async(tool_name, tool_input, *args, **kwargs):
-        if tool_name not in V2_ADVERTISED:
+        if not isinstance(tool_name, str) or tool_name not in allowed:
             return _rejection(str(tool_name))
         return await orig["dispatch_tool_async"](tool_name, tool_input, *args, **kwargs)
 
     def guarded_sync(tool_name, tool_input, *args, **kwargs):
-        if tool_name not in V2_ADVERTISED:
+        if not isinstance(tool_name, str) or tool_name not in allowed:
             return _rejection(str(tool_name))
         return orig["dispatch_tool"](tool_name, tool_input, *args, **kwargs)
 
@@ -278,12 +318,12 @@ def _apply_guard(enabled: bool) -> None:
     dispatch.dispatch_tool = guarded_sync
 
 
-def install(policy_id: str) -> Dict[str, Any]:
-    """Apply a policy to this process: prompt constant, tool overlay, dispatch guard. Idempotent: the result depends
-    only on policy_id, not on earlier installs. Validates every pinned text before changing anything."""
-    expected = expected_metadata(policy_id)
+def install(policy_id: str, declared: Any) -> Dict[str, Any]:
+    """Apply a policy to this process for one scenario's declared tools: prompt constant, advertised tools, dispatch
+    guard. Idempotent: the result depends only on the arguments. Every pinned text is validated before anything changes."""
+    expected = expected_metadata(policy_id, declared)
     effective = _prompt_for(policy_id)
-    _apply_guard(policy_id == POLICY_V2)
+    _apply_guard(policy_id, declared)
     from src import prompts as _prompts
     _prompts.SYSTEM_PROMPT = effective
     return expected
@@ -291,7 +331,7 @@ def install(policy_id: str) -> Dict[str, Any]:
 
 def uninstall() -> None:
     """Restore the production prompt, tool list and dispatch (used by tests)."""
-    _apply_guard(False)
+    _apply_guard(None, None)
     from src import prompts as _prompts
     _prompts.SYSTEM_PROMPT = production_prompt()
 
@@ -303,15 +343,16 @@ def validate_policy_metadata(reported: Any, requested: str, expected: Dict[str, 
     problems: List[str] = []
     if not isinstance(reported, dict):
         return ["policy metadata is missing or not an object"]
-    required = ("policy_id", "production_prompt_sha256", "effective_prompt_sha256", "replacements_applied",
-                "shell_allowlist", "dispatch_guard", "advertised_tools")
+    required = ("policy_id", "contract_revision", "source_revision", "production_prompt_sha256",
+                "effective_prompt_sha256", "replacements_applied", "shell_allowlist", "dispatch_guard",
+                "advertised_tools")
     missing = [k for k in required if k not in reported]
     if missing:
         return [f"policy metadata lacks {missing}"]
     if reported["policy_id"] != requested:
         problems.append(f"applied policy {reported['policy_id']!r} != requested {requested!r}")
-    for key in ("production_prompt_sha256", "effective_prompt_sha256", "replacements_applied", "shell_allowlist",
-                "dispatch_guard", "advertised_tools"):
+    for key in ("contract_revision", "source_revision", "production_prompt_sha256", "effective_prompt_sha256",
+                "replacements_applied", "shell_allowlist", "dispatch_guard", "advertised_tools"):
         if reported[key] != expected[key]:
             problems.append(f"{key}: reported {reported[key]!r}, expected {expected[key]!r}")
     if not isinstance(actual_tool_hashes, list) or not actual_tool_hashes:
@@ -319,7 +360,7 @@ def validate_policy_metadata(reported: Any, requested: str, expected: Dict[str, 
     elif not all(isinstance(h, str) and re.fullmatch(r"[0-9a-f]{64}", h) for h in actual_tool_hashes):
         problems.append("provider-visible tool-schema hashes are malformed")
     elif set(actual_tool_hashes) != {expected["expected_tool_schema_sha256"]}:
-        problems.append("provider-visible tool schemas differ from the expected overlay")
+        problems.append("provider-visible tool schemas differ from the expected contract")
     return problems
 
 

@@ -191,7 +191,7 @@ def test_result_and_session_identity_uses_the_new_scenario_id():
     blocked = json.loads((REPO / "tests" / "fixtures" / "rme1" / "session_blocked_glm16.json").read_text())
     blocked["session_id"] = "rme1-RME-DEBUG-02"
     validate_session_data(blocked)
-    meta = policy.expected_metadata("RME-01-POLICY-V2")
+    meta = policy.expected_metadata("RME-01-POLICY-V2", scenarios.SCENARIOS["RME-DEBUG-02"].tools)
     summary = {"scenario": "RME-DEBUG-02", "intended_model": "zai-org/glm-4.7-flash",
                "actual_request_models": ["zai-org/glm-4.7-flash"], "request_count": 1, "run_status": "blocked",
                "reason": "recorded", "policy": dict(meta, tool_schema_sha256=[meta["expected_tool_schema_sha256"]])}

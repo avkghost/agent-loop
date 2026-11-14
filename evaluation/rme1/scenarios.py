@@ -4,7 +4,7 @@ Hidden evaluator checks are NOT here; see evaluator.py (host only)."""
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 RESULT_BYTES_LIMIT = 64 * 1024
@@ -14,6 +14,8 @@ WALL_CLOCK_SECONDS = 300
 SHELL_TIMEOUT_SECONDS = 15
 # The only commands the model may run in a trial. Explicit and narrow; nothing is granted by ALLOW_ALL.
 TRIAL_TOOL_ALLOWLIST = {"python3", "ls", "cat"}
+# The provider-visible tools of the RME-01 scenarios. Declared per scenario; nothing is exposed by default.
+TRIAL_TOOLS = ("run_command", "write_file", "read_file", "list_directory")
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,7 @@ class Scenario:
     protected: List[str]                    # files the model must not change (hashed before the trial)
     criteria: List[Dict[str, Any]]          # trusted criteria, as plain data for AcceptanceCriterion
     hidden_check: str                       # evaluator script file name, kept OUTSIDE the workspace
+    tools: Tuple[str, ...]                  # the only tools advertised to the model and allowed to run, in order
     fixture_root: Optional[str] = None      # host-only directory the fixture is copied from (when fixtures is empty)
     hidden_source: Optional[str] = None     # host-only path of an external hidden evaluator (when not built in)
 
@@ -47,6 +50,7 @@ SCENARIOS: Dict[str, Scenario] = {
              "parameters": {"command": "python3 -m unittest -q test_logsum", "timeout_seconds": 15}},
         ],
         hidden_check="hidden_rme01.py",
+        tools=TRIAL_TOOLS,
     ),
     "RME-02": Scenario(
         scenario_id="RME-02",
@@ -78,6 +82,7 @@ SCENARIOS: Dict[str, Scenario] = {
              "parameters": {"path": "calc/stats.py", "contains": "def mean"}},
         ],
         hidden_check="hidden_rme02.py",
+        tools=TRIAL_TOOLS,
     ),
     "RME-03": Scenario(
         scenario_id="RME-03",
@@ -103,6 +108,7 @@ SCENARIOS: Dict[str, Scenario] = {
              "parameters": {"command": "python3 -m unittest discover -s tests -q", "timeout_seconds": 15}},
         ],
         hidden_check="hidden_rme03.py",
+        tools=TRIAL_TOOLS,
     ),
 }
 
@@ -124,7 +130,7 @@ for _name in DEBUG_BENCHMARK_DIRS:
     _debug = _load_debug_spec(_base)
     SCENARIOS[_debug.SCENARIO_ID] = Scenario(
         fixtures={}, fixture_root=str(_base / _debug.ASSET_DIR), hidden_source=str(_base / _debug.HIDDEN_FILE),
-        **_debug.KWARGS)
+        tools=TRIAL_TOOLS, **_debug.KWARGS)
 
 
 def scenario_fixtures(scenario: Scenario) -> Dict[str, str]:

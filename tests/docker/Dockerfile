@@ -8,7 +8,7 @@ WORKDIR /workspace
 
 COPY requirements/base.txt requirements/dev.txt requirements.txt ./requirements/
 RUN apt-get update \
-    && apt-get install --no-install-recommends --yes procps \
+    && apt-get install --no-install-recommends --yes git procps \
     && rm -rf /var/lib/apt/lists/* \
     && python -m pip install --no-cache-dir -r requirements/dev.txt
 
@@ -19,4 +19,4 @@ RUN useradd --create-home --uid 10001 agent \
 USER agent
 
 ENTRYPOINT ["python", "-m", "pytest"]
-CMD ["-p", "no:cacheprovider", "-q", "-rfEXs", "-W", "default"]
+CMD ["-p", "no:cacheprovider", "-q", "-rfEXs", "-W", "default", "tests"]

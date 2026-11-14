@@ -86,7 +86,7 @@ def main(scenario_id: str, workspace: str, session_dir: str) -> int:
     install_request_recorder()
     install_non_interactive_denial()
     try:
-        policy_meta = policy.install(POLICY)  # before any request; a refusal here sends nothing to the model
+        policy_meta = policy.install(POLICY, scenario.tools)  # before any request; a refusal here sends nothing to the model
     except policy.PolicyError as exc:
         sys.exit(f"policy refused: {exc}")
     sid = f"rme1-{scenario_id}"

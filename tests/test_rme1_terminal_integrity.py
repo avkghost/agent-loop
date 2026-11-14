@@ -22,6 +22,7 @@ RME = REPO / "evaluation" / "rme1"
 FIX = REPO / "tests" / "fixtures" / "rme1"
 sys.path.insert(0, str(RME))
 import policy  # noqa: E402
+import scenarios  # noqa: E402
 import supervisor  # noqa: E402
 from deadline import SnapshotPoller  # noqa: E402
 
@@ -38,7 +39,7 @@ def _load(name):
 
 
 def _summary(run_status, reason="recorded", scenario="RME-01", deadline_signalled=None):
-    meta = policy.expected_metadata(V2)
+    meta = policy.expected_metadata(V2, scenarios.SCENARIOS[scenario].tools)
     doc = {"scenario": scenario, "intended_model": MODEL, "actual_request_models": [MODEL], "request_count": 1,
            "run_status": run_status, "reason": reason,
            "policy": dict(meta, tool_schema_sha256=[meta["expected_tool_schema_sha256"]])}

@@ -23,6 +23,8 @@ sys.path.insert(0, str(RME))
 import policy  # noqa: E402
 import scenarios  # noqa: E402
 
+DECLARED = scenarios.SCENARIOS["RME-01"].tools
+
 HARNESS_PATH = RME / "harness.py"
 spec = importlib.util.spec_from_file_location("rme1_harness_policy", HARNESS_PATH)
 harness = importlib.util.module_from_spec(spec)
@@ -113,13 +115,13 @@ def test_unrelated_prompt_change_is_rejected_even_when_every_replacement_still_m
 
 def test_policy_v1_is_the_unmodified_production_prompt():
     assert policy.effective_prompt(policy.POLICY_V1) == prompts.SYSTEM_PROMPT
-    meta = policy.install(policy.POLICY_V1)
+    meta = policy.install(policy.POLICY_V1, DECLARED)
     assert meta["effective_prompt_sha256"] == meta["production_prompt_sha256"] == PRODUCTION_PROMPT_SHA
     assert meta["replacements_applied"] == 0 and meta["shell_allowlist"] == ["cat", "ls", "python3"]
 
 
 def test_policy_v2_install_records_identity_and_allowlist(restore_prompt):
-    meta = policy.install(policy.POLICY_V2)
+    meta = policy.install(policy.POLICY_V2, DECLARED)
     assert meta["policy_id"] == "RME-01-POLICY-V2"
     assert meta["effective_prompt_sha256"] == V2_PROMPT_SHA
     assert meta["production_prompt_sha256"] == PRODUCTION_PROMPT_SHA
@@ -132,7 +134,7 @@ def test_policy_v2_install_records_identity_and_allowlist(restore_prompt):
 def _capture_run(tmp_path, monkeypatch, policy_id, scripted, deny_callback=None):
     monkeypatch.setattr(session, "SESSIONS_DIR", tmp_path / "unused-home")
     monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
-    policy.install(policy_id)  # the trial process installs its policy before any request
+    policy.install(policy_id, DECLARED)  # the trial process installs its policy before any request
     seen = {"payloads": [], "prompts": []}
     queue = list(scripted)
 

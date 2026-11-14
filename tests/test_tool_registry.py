@@ -9,10 +9,11 @@ from src import dispatch, envelope, jobs
 from src.authorization import SessionAuthorization
 from src.tools import get_local_tools, local_registry
 from src.tools import shell
-from src.tools.registry import FILE, JOB, MCP, SHELL, RegistryError, ToolDescriptor, ToolRegistry
+from src.tools.registry import FILE, GIT, JOB, MCP, SHELL, RegistryError, ToolDescriptor, ToolRegistry
 
 PROVIDER_ORDER = ["start_job", "status_job", "collect_job", "terminate_job",
-                  "run_command", "write_file", "read_file", "list_directory"]
+                  "run_command", "write_file", "read_file", "list_directory",
+                  "edit_file", "git_status", "git_diff"]
 
 
 def _schema(name):
@@ -30,6 +31,9 @@ def test_routing_kinds_match_the_tool_families():
     assert registry.kind_of("read_file") == FILE
     assert registry.kind_of("write_file") == FILE
     assert registry.kind_of("list_directory") == FILE
+    assert registry.kind_of("edit_file") == FILE
+    assert registry.kind_of("git_status") == GIT
+    assert registry.kind_of("git_diff") == GIT
     for name in ("start_job", "status_job", "collect_job", "terminate_job"):
         assert registry.kind_of(name) == JOB
     assert registry.kind_of("mcp_anything") == MCP

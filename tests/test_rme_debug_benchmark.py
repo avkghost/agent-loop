@@ -213,7 +213,7 @@ def _real_session():
 
 
 def _summary(run_status, scenario_id=DEBUG_ID):
-    meta = policy.expected_metadata("RME-01-POLICY-V2")
+    meta = policy.expected_metadata("RME-01-POLICY-V2", scenarios.SCENARIOS["RME-DEBUG-01"].tools)
     return {"scenario": scenario_id, "intended_model": "zai-org/glm-4.7-flash",
             "actual_request_models": ["zai-org/glm-4.7-flash"], "request_count": 1, "run_status": run_status,
             "reason": "recorded", "deadline_signalled": True,

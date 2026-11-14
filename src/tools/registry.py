@@ -7,6 +7,7 @@ Kinds are declarative routing information:
   file   built-in file tools, contained to the working directory
   shell  run_command, a foreground shell command
   job    managed-job tools, owned by the calling session
+  git    read-only Git inspection (fixed commands, no model-supplied Git options)
   mcp    names with the mcp_ prefix, registered by MCP servers at runtime; never registered locally
 
 The registry is built once, finalized, and then immutable. It is not a plugin system: nothing is discovered
@@ -21,8 +22,9 @@ from typing import Any, Dict, List, Optional
 FILE = "file"
 SHELL = "shell"
 JOB = "job"
+GIT = "git"
 MCP = "mcp"
-KINDS = frozenset({FILE, SHELL, JOB})
+KINDS = frozenset({FILE, SHELL, JOB, GIT})
 MCP_PREFIX = "mcp_"
 
 

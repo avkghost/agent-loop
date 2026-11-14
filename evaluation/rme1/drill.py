@@ -108,8 +108,9 @@ def _drill(kind, image, deadline, grace):
 PROBE = """import asyncio, json, os, sys
 sys.path.insert(0, "/opt/agent-loop/evaluation/rme1")
 import policy
+import scenarios
 from src import dispatch, loop
-meta = policy.install("RME-01-POLICY-V2")
+meta = policy.install("RME-01-POLICY-V2", scenarios.SCENARIOS["RME-01"].tools)
 advertised = [t["function"]["name"] for t in loop.get_all_tools(None)]
 rejected = asyncio.run(dispatch.dispatch_tool_async("start_job", {"command": "touch /work/started.txt"}, None, None))
 listed = asyncio.run(dispatch.dispatch_tool_async("list_directory", {"path": "."}, None, None))
@@ -128,7 +129,7 @@ def policy_drill(image, expected_revision):
     results.mkdir()
     (workspace / "drill_sink.py").write_text(SINK)
     image_identity = supervisor.verify_image(image, expected_revision)  # the real image check
-    expected = policy.expected_metadata(policy.POLICY_V2)
+    expected = policy.expected_metadata(policy.POLICY_V2, harness.SCENARIOS["RME-01"].tools)
     out = {"image": image_identity, "expected_policy": expected}
 
     # A: the runner, with Policy v2 applied, publishes RESULT and SESSION through a silent sink (no LLM).
@@ -186,7 +187,7 @@ def frame(kind, obj, digest=None):
     text = json.dumps(obj, sort_keys=True)
     digest = digest or hashlib.sha256(text.encode("utf-8")).hexdigest()
     return f"\nRME_FRAME {kind} BEGIN {nonce}\n{text}\nRME_FRAME {kind} END {nonce} {digest}\n"
-meta = policy.expected_metadata("RME-01-POLICY-V2")
+meta = policy.expected_metadata("RME-01-POLICY-V2", harness.SCENARIOS["RME-01"].tools)
 summary = {"scenario": "RME-01", "intended_model": model, "actual_request_models": [model], "request_count": 1,
            "run_status": "interrupted", "reason": "external deadline: the goal was cancelled and its state saved",
            "policy": dict(meta, tool_schema_sha256=[meta["expected_tool_schema_sha256"]]), "deadline_signalled": True}

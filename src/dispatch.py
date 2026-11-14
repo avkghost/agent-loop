@@ -1,14 +1,16 @@
 """Tool dispatch and permission gating."""
 
 import asyncio
+import functools
 import json
+import threading
 from typing import Dict, Any, Optional
 
 from . import config, envelope
 from .authorization import SessionAuthorization
 from .envelope import ToolExecutionError  # re-exported: dispatch.ToolExecutionError
-from .tools import shell, files, local_registry
-from .tools.registry import FILE, JOB, MCP, SHELL
+from .tools import shell, files, git_tools, local_registry
+from .tools.registry import FILE, GIT, JOB, MCP, SHELL
 from . import jobs
 from .tools.mcp_client import MCPClientManager
 
@@ -83,9 +85,29 @@ async def dispatch_tool_async(tool_name: str, tool_input: Dict[str, Any], mcp_cl
             return gate
         return await mcp_client.call_tool(tool_name, tool_input)
 
+    if kind == GIT:
+        denial = _allowed_tools_denial(tool_name, allowed_tools)
+        if denial:
+            return denial
+        return await _git_cancellable(tool_name, tool_input)
+
     # File tools and unknown names go through the synchronous path, which rejects unknown names
     return dispatch_tool(tool_name, tool_input, mcp_client, event_loop, allowed_tools=allowed_tools,
                          authorization=authorization)
+
+
+async def _git_cancellable(tool_name: str, tool_input: Dict[str, Any]) -> Dict[str, Any]:
+    """Run a Git inspection in a worker thread. If the caller is cancelled, the worker is told to stop its Git process
+    group, and the cancellation completes only after that process is reaped and its temporary index is removed."""
+    cancel = threading.Event()
+    work = asyncio.get_running_loop().run_in_executor(
+        None, functools.partial(git_tools.call, tool_name, tool_input, cancel))
+    try:
+        return await asyncio.shield(work)
+    except asyncio.CancelledError:
+        cancel.set()
+        await asyncio.wait({work})
+        raise
 
 
 def dispatch_tool(tool_name: str, tool_input: Dict[str, Any], mcp_client: Optional[MCPClientManager] = None,
@@ -141,6 +163,15 @@ def dispatch_tool(tool_name: str, tool_input: Dict[str, Any], mcp_client: Option
                 )
             searched = authorization is not None and authorization.has_searched
             return files.write_file_safe(path, content, searched=searched)
+
+        if tool_name == "edit_file":
+            # Argument checks (path, old_string, new_string) are made inside edit_file_safe, which refuses
+            # every bad input before the file is touched.
+            return files.edit_file_safe(tool_input.get("path"), tool_input.get("old_string"),
+                                        tool_input.get("new_string"))
+
+    if kind == GIT:
+        return git_tools.call(tool_name, tool_input)
 
     if kind == JOB:
         return jobs.call_tool_sync(tool_name, tool_input, authorization)

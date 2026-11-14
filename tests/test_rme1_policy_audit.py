@@ -20,6 +20,7 @@ REPO = Path(__file__).resolve().parents[1]
 RME = REPO / "evaluation" / "rme1"
 sys.path.insert(0, str(RME))
 import policy  # noqa: E402
+import scenarios  # noqa: E402
 import supervisor  # noqa: E402
 
 spec = importlib.util.spec_from_file_location("rme1_harness_audit", RME / "harness.py")
@@ -27,6 +28,9 @@ harness = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(harness)
 
 JOB_NAMES = ("start_job", "status_job", "collect_job", "terminate_job")
+DECLARED = scenarios.SCENARIOS["RME-01"].tools
+NOT_DECLARED = ("start_job", "status_job", "collect_job", "terminate_job", "shell_exec", "grep_files",
+                "edit_file", "git_status", "git_diff")
 
 
 def _run_v2_script(tmp_path, monkeypatch, restore, scripted):
@@ -42,11 +46,11 @@ def _saved_session(tmp_path):
 # 1. start_job cannot execute under Policy v2 (dispatch level, and through a model request in a trial)
 def test_start_job_cannot_execute_under_policy_v2(tmp_path, restore_prompt):
     marker = tmp_path / "started.txt"
-    policy.install(policy.POLICY_V2)
+    policy.install(policy.POLICY_V2, DECLARED)
     import asyncio
     result = asyncio.run(dispatch.dispatch_tool_async("start_job", {"command": f"touch {marker}"}, None, None))
     assert result.get("isError") is True and result.get("errorCategory") == "permission"
-    assert "not authorized under RME-01 Policy v2" in result["content"]
+    assert "not authorized for this scenario" in result["content"]
     assert not marker.exists()
 
 
@@ -62,9 +66,9 @@ def test_a_model_requested_start_job_is_rejected_in_a_trial_and_never_runs(tmp_p
 
 
 # 2. unexpected prohibited tool calls cannot bypass the restriction
-@pytest.mark.parametrize("name", list(JOB_NAMES) + ["shell_exec", "grep_files"])
+@pytest.mark.parametrize("name", list(NOT_DECLARED))
 def test_unexpected_prohibited_or_unknown_tools_are_rejected_directly(name, restore_prompt):
-    policy.install(policy.POLICY_V2)
+    policy.install(policy.POLICY_V2, DECLARED)
     import asyncio
     result = asyncio.run(dispatch.dispatch_tool_async(name, {"command": "true", "job_id": "x"}, None, None))
     assert result.get("isError") is True and result.get("errorCategory") == "permission", name
@@ -78,27 +82,27 @@ def test_run_command_with_find_still_needs_approval_under_v2(tmp_path, restore_p
     assert approvals and record["classification"] == harness.BLOCKED
 
 
-# 3. policy v1 preserves the original tools and schemas
-def test_policy_v1_preserves_original_tools_and_schemas(restore_prompt):
+# 3. policy v1 advertises exactly the scenario's declared tools; the production callables are restored afterwards
+def test_policy_v1_advertises_only_the_declared_tools_and_restores_on_uninstall(restore_prompt):
     original_get, original_dispatch = loop.get_all_tools, dispatch.dispatch_tool_async
-    policy.install(policy.POLICY_V1)
-    assert loop.get_all_tools is original_get and dispatch.dispatch_tool_async is original_dispatch
-    assert loop.get_all_tools(None) == policy.production_tools()
+    policy.install(policy.POLICY_V1, DECLARED)
     names = [t["function"]["name"] for t in loop.get_all_tools(None)]
-    assert set(JOB_NAMES) <= set(names), "v1 keeps the production job tools advertised"
+    assert names == list(DECLARED)
+    assert not set(JOB_NAMES) & set(names), "managed-job tools are not advertised to any scenario"
+    policy.uninstall()
+    assert loop.get_all_tools is original_get and dispatch.dispatch_tool_async is original_dispatch
 
 
-def test_policy_v1_request_carries_the_production_tool_schemas(tmp_path, restore_prompt):
+def test_policy_v1_request_carries_exactly_the_scenario_tool_schemas(tmp_path, restore_prompt):
     scripted = [make_streamed_response(finish_reason="stop", content="x")]
-    _, seen, _ = _run_v2_script(tmp_path, restore_prompt, restore_prompt, [])  # placeholder to keep helper use
     record, seen, _ = _capture_run(tmp_path / "v1", restore_prompt, policy.POLICY_V1, scripted)
-    assert seen["payloads"][0]["tools"] == policy.production_tools()
+    assert seen["payloads"][0]["tools"] == policy.advertised_tools(policy.POLICY_V1, DECLARED)
 
 
 # 4. policy v2 descriptions contain no contradictory executable examples
 def test_policy_v2_advertised_descriptions_contain_no_executable_prohibited_examples():
-    tools = policy.overlay_tools(policy.production_tools())
-    assert [t["function"]["name"] for t in tools] == list(policy.V2_ADVERTISED)
+    tools = policy.advertised_tools(policy.POLICY_V2, DECLARED)
+    assert [t["function"]["name"] for t in tools] == list(DECLARED)
     banned = ['run_command with "grep', 'run_command with "find', "use start_job", "approves them",
               "for a long-running process use start_job", "run_command with grep, rg, or find"]
     for tool in tools:
@@ -109,7 +113,7 @@ def test_policy_v2_advertised_descriptions_contain_no_executable_prohibited_exam
 
 def test_policy_v2_keeps_names_and_argument_schemas_of_advertised_tools():
     production = {t["function"]["name"]: t for t in policy.production_tools()}
-    for tool in policy.overlay_tools(policy.production_tools()):
+    for tool in policy.advertised_tools(policy.POLICY_V2, DECLARED):
         name = tool["function"]["name"]
         assert tool["function"]["parameters"] == production[name]["function"]["parameters"], name
         assert tool["type"] == production[name]["type"]
@@ -120,20 +124,22 @@ def test_changed_source_tool_description_is_rejected(monkeypatch):
     changed = policy.production_tools()
     changed[4]["function"]["description"] += " An unrelated change."
     monkeypatch.setattr(policy, "production_tools", lambda: changed)
-    with pytest.raises(policy.PolicyError, match="tool schemas changed"):
-        policy.expected_metadata(policy.POLICY_V2)
+    with pytest.raises(policy.PolicyError, match="schema of .* changed"):
+        policy.expected_metadata(policy.POLICY_V2, DECLARED)
 
 
-def test_changed_source_tool_is_rejected_at_the_overlay_boundary():
+def test_changed_source_tool_is_rejected_at_the_advertisement_boundary(monkeypatch):
     changed = policy.production_tools()
-    changed[0]["function"]["parameters"]["properties"]["extra"] = {"type": "string"}
-    with pytest.raises(policy.PolicyError, match="tool schemas changed"):
-        policy.overlay_tools(changed)
+    read = next(s for s in changed if s["function"]["name"] == "read_file")  # a declared tool
+    read["function"]["parameters"]["properties"]["extra"] = {"type": "string"}
+    monkeypatch.setattr(policy, "production_tools", lambda: changed)
+    with pytest.raises(policy.PolicyError, match="schema of .* changed"):
+        policy.advertised_tools(policy.POLICY_V2, DECLARED)
 
 
 # 7-8. correct, missing and mismatched metadata
 def _expected(pid):
-    return policy.expected_metadata(pid)
+    return policy.expected_metadata(pid, DECLARED)
 
 
 def _reported(pid):
@@ -156,6 +162,10 @@ def test_correct_policy_metadata_is_accepted_for_both_policies():
     (lambda r: r.__setitem__("shell_allowlist", ["python3", "ls", "cat", "find"]), "shell_allowlist"),
     (lambda r: r.__setitem__("dispatch_guard", "none"), "dispatch_guard"),
     (lambda r: r.__setitem__("advertised_tools", list(JOB_NAMES)), "advertised_tools"),
+    (lambda r: r.__setitem__("advertised_tools", list(reversed(DECLARED))), "advertised_tools"),
+    (lambda r: r.__setitem__("advertised_tools", list(DECLARED) + ["edit_file"]), "advertised_tools"),
+    (lambda r: r.__setitem__("contract_revision", "RME-01-CONTRACT-R1"), "contract_revision"),
+    (lambda r: r.__setitem__("source_revision", "0" * 64), "source_revision"),
 ])
 def test_mismatched_policy_metadata_is_rejected(mutate, fragment):
     exp = _expected(policy.POLICY_V2)
@@ -268,4 +278,4 @@ def test_rejected_call_pairs_with_one_journal_record_and_a_protocol_valid_histor
     assert calls[0]["status"] == "failed" and calls[0]["error_category"] == "permission"
     assert protocol_violations(saved["messages"]) == []
     tool_msgs = [m for m in saved["messages"] if m.get("role") == "tool"]
-    assert len(tool_msgs) == 1 and "not authorized under RME-01 Policy v2" in tool_msgs[0]["content"]
+    assert len(tool_msgs) == 1 and "not authorized for this scenario" in tool_msgs[0]["content"]

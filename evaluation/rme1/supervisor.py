@@ -160,7 +160,7 @@ def classify_trial(*, status: str, detail: str, summary, timed_out: bool, gracef
     run_status, reason = summary["run_status"], summary["reason"]
     mismatch = check_model_identity(summary, model)
     reported_policy = summary.get("policy")
-    expected_policy = policy.expected_metadata(policy_id)  # host-computed, never taken from the frame
+    expected_policy = policy.expected_metadata(policy_id, harness.SCENARIOS[scenario].tools)  # host-computed, never taken from the frame
     policy_problems = policy.validate_policy_metadata(
         reported_policy, policy_id, expected_policy,
         reported_policy.get("tool_schema_sha256") if isinstance(reported_policy, dict) else None)
