@@ -190,7 +190,8 @@ def test_the_hidden_file_is_outside_the_fixture_and_the_image_copies_only_the_sp
     dockerfile = (RME1 / "Dockerfile").read_text()
     copies = [line for line in dockerfile.splitlines() if line.startswith("COPY")]
     debug_copies = [line for line in copies if "rme_debug" in line]
-    assert debug_copies == ["COPY evaluation/rme_debug/spec.py /opt/agent-loop/evaluation/rme_debug/spec.py"]
+    assert debug_copies == ["COPY evaluation/rme_debug/spec.py /opt/agent-loop/evaluation/rme_debug/spec.py",
+                            "COPY evaluation/rme_debug_02/spec.py /opt/agent-loop/evaluation/rme_debug_02/spec.py"]
     assert not any(token in line for line in copies for token in ("assets", "hidden", "reference"))
 
 

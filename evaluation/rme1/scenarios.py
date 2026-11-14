@@ -106,23 +106,25 @@ SCENARIOS: Dict[str, Scenario] = {
     ),
 }
 
-# RME-DEBUG-01 is defined in evaluation/rme_debug/spec.py (pure data, importable in the agent image). Its fixture and
+# The debug benchmarks are defined in evaluation/<dir>/spec.py (pure data, importable in the agent image). Its fixture and
 # hidden evaluator are host-only files, referenced by path and never read here. RME-01/02/03 above are unchanged.
-_DEBUG_DIR = Path(__file__).resolve().parents[1] / "rme_debug"
+DEBUG_BENCHMARK_DIRS = ("rme_debug", "rme_debug_02")
 
 
-def _load_debug_spec():
+def _load_debug_spec(directory: Path):
     import importlib.util
-    spec = importlib.util.spec_from_file_location("rme_debug_spec", _DEBUG_DIR / "spec.py")
+    spec = importlib.util.spec_from_file_location(f"{directory.name}_spec", directory / "spec.py")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
 
 
-_debug = _load_debug_spec()
-SCENARIOS[_debug.SCENARIO_ID] = Scenario(
-    fixtures={}, fixture_root=str(_DEBUG_DIR / _debug.ASSET_DIR), hidden_source=str(_DEBUG_DIR / _debug.HIDDEN_FILE),
-    **_debug.KWARGS)
+for _name in DEBUG_BENCHMARK_DIRS:
+    _base = Path(__file__).resolve().parents[1] / _name
+    _debug = _load_debug_spec(_base)
+    SCENARIOS[_debug.SCENARIO_ID] = Scenario(
+        fixtures={}, fixture_root=str(_base / _debug.ASSET_DIR), hidden_source=str(_base / _debug.HIDDEN_FILE),
+        **_debug.KWARGS)
 
 
 def scenario_fixtures(scenario: Scenario) -> Dict[str, str]:
