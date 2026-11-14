@@ -47,6 +47,10 @@ INTERRUPTED = "INTERRUPTED"
 NOT_EXECUTED = "NOT_EXECUTED"
 EVALUATION_ENVIRONMENT_FAILURE = "EVALUATION_ENVIRONMENT_FAILURE"  # result frame missing or corrupt; never success
 INVALID_MODEL_MISMATCH = "INVALID_MODEL_MISMATCH"                  # requests did not use the intended model
+INVALID_POLICY_MISMATCH = "INVALID_POLICY_MISMATCH"
+INVALID_RESULT_SESSION = "INVALID_RESULT_SESSION"
+INVALID_RESULT = "INVALID_RESULT"
+DEADLINE_OVERRUN = "DEADLINE_OVERRUN"  # runtime reported completion after the deadline was reached; success not established  # RESULT frame corrupt, malformed, or with an unknown run status  # RESULT and SESSION frames contradict
 LIMIT_REACHED = "LIMIT_REACHED"                         # runtime: iteration limit, independent evaluator FAIL or absent
 LIMIT_REACHED_EVALUATOR_PASS = "LIMIT_REACHED_EVALUATOR_PASS"  # runtime: iteration limit; the work product passed the
                                                                # hidden checks, but the run never completed or verified

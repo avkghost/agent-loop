@@ -20,6 +20,9 @@ from pathlib import Path
 MODEL = os.environ.get("RME_MODEL", "")
 if not MODEL:
     sys.exit("RME_MODEL is required: no default model is used in a trial")
+POLICY = os.environ.get("RME_POLICY", "")
+if not POLICY:
+    sys.exit("RME_POLICY is required: the trial policy is never implied")
 
 # Point the existing provider at the approved endpoint and the intended model BEFORE the runtime modules load.
 from src import config  # noqa: E402
@@ -28,6 +31,7 @@ config.MODEL_NAME = MODEL
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import scenarios  # noqa: E402
+import policy  # noqa: E402
 from src import loop, provider, session  # noqa: E402
 from src.runtime import AgentRuntime  # noqa: E402
 import metrics  # noqa: E402
@@ -38,6 +42,7 @@ metrics.wrap_complete(provider.LMStudioProvider, TURN_RECORDS)
 MARK = "RME_FRAME"
 SESSION_LIMIT = 2 * 1024 * 1024
 REQUEST_MODELS = []
+REQUEST_TOOL_HASHES = []
 
 
 def install_request_recorder() -> None:
@@ -47,6 +52,7 @@ def install_request_recorder() -> None:
     def recording(messages, tools, options):
         payload = real_build_payload(messages, tools, options)
         REQUEST_MODELS.append(payload.get("model"))
+        REQUEST_TOOL_HASHES.append(policy.tool_schema_sha256(payload.get("tools")))
         return payload
 
     provider.build_payload = recording
@@ -79,6 +85,10 @@ def main(scenario_id: str, workspace: str, session_dir: str) -> int:
     session.SESSIONS_DIR = Path(session_dir)
     install_request_recorder()
     install_non_interactive_denial()
+    try:
+        policy_meta = policy.install(POLICY)  # before any request; a refusal here sends nothing to the model
+    except policy.PolicyError as exc:
+        sys.exit(f"policy refused: {exc}")
     sid = f"rme1-{scenario_id}"
     rt = AgentRuntime()
     state = {"task": None, "deadline": False}
@@ -130,6 +140,7 @@ def main(scenario_id: str, workspace: str, session_dir: str) -> int:
                                   "observation": r["observation"][:200]}
                                  for r in saved.get("verification_results", [])][:100],
         "uid": os.getuid(), "llm_url": config.LM_STUDIO_URL,
+        "policy": dict(policy_meta, tool_schema_sha256=sorted(set(REQUEST_TOOL_HASHES))),
     }
     sys.stdout.write(frame("RESULT", nonce, summary))
     session_text = json.dumps(saved, sort_keys=True)

@@ -73,7 +73,7 @@ def test_missing_image_is_rejected():
 def test_model_override_reaches_the_provider_configuration():
     code = ("import sys; sys.path.insert(0, 'evaluation/rme1'); import runner; from src import provider; "
             "print(provider.GenerationOptions().model)")
-    proc = _subprocess_python(code, {"RME_MODEL": "qwen/qwen3.8-27b", "RME_LLM_URL": "http://h:1/v1/chat/completions"})
+    proc = _subprocess_python(code, {"RME_MODEL": "qwen/qwen3.8-27b", "RME_POLICY": "RME-01-POLICY-V1", "RME_LLM_URL": "http://h:1/v1/chat/completions"})
     assert proc.returncode == 0, proc.stderr
     assert proc.stdout.strip().splitlines()[-1] == "qwen/qwen3.8-27b"
 
@@ -83,7 +83,7 @@ def test_intended_and_actual_request_models_are_recorded_and_compared():
             "runner.install_request_recorder(); "
             "provider.build_payload([{'role': 'user', 'content': 'x'}], None, provider.GenerationOptions()); "
             "print(json.dumps(runner.REQUEST_MODELS))")
-    proc = _subprocess_python(code, {"RME_MODEL": "zai-org/glm-4.7-flash", "RME_LLM_URL": "http://h:1/v1/chat/completions"})
+    proc = _subprocess_python(code, {"RME_MODEL": "zai-org/glm-4.7-flash", "RME_POLICY": "RME-01-POLICY-V1", "RME_LLM_URL": "http://h:1/v1/chat/completions"})
     assert proc.returncode == 0, proc.stderr
     assert json.loads(proc.stdout.strip().splitlines()[-1]) == ["zai-org/glm-4.7-flash"]
 
@@ -91,7 +91,8 @@ def test_intended_and_actual_request_models_are_recorded_and_compared():
 # 5. no default model: a missing override stops before any request
 def test_missing_model_override_does_not_select_another_model():
     proc = _subprocess_python("import sys; sys.path.insert(0, 'evaluation/rme1'); import runner",
-                              {"RME_LLM_URL": "http://h:1/v1/chat/completions"}, drop=("RME_MODEL",))
+                              {"RME_LLM_URL": "http://h:1/v1/chat/completions", "RME_POLICY": "RME-01-POLICY-V1"},
+                              drop=("RME_MODEL",))
     assert proc.returncode != 0 and "RME_MODEL is required" in proc.stderr
 
 

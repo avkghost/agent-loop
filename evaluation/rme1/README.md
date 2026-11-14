@@ -57,3 +57,22 @@ interpreted as UTC on the host.
    benchmark results and never merged into them.
 5. Token measurements come from existing response metadata only (`metrics.py`). Time to first token and reasoning
    tokens are not available without a production change and are reported as unavailable.
+
+## RME-01 policy versions (evaluation infrastructure only)
+
+`--policy` is required by `supervisor.py` and sent to the runner as `RME_POLICY`. Nothing is implied.
+- `RME-01-POLICY-V1`: the historical configuration. The model receives the unmodified production system prompt.
+- `RME-01-POLICY-V2`: the production prompt with nine exact, count-checked replacements that remove the examples of
+  unauthorized shell commands (`find`, `grep`, `rg`, pipelines, `make`, background jobs), plus an appended
+  authorization block that lists the only authorized basenames (`python3`, `ls`, `cat`) and directs discovery to
+  `list_directory` and `read_file`. See `policy.py`.
+
+Both policies keep the goal, criteria, budgets, temperature, and the production tool authorization unchanged. The
+runner records the applied policy id, production and effective prompt hashes, the shell allowlist, and the tool
+schema hashes of every request; the supervisor classifies a mismatch as `INVALID_POLICY_MISMATCH`.
+Policy v2 also (1) overlays the provider-visible tools: managed-job tools are not advertised and six descriptions
+that advertised unauthorized commands are corrected (names and argument schemas kept); (2) guards dispatch: any tool
+outside the four advertised tools is rejected with the production permission envelope and never runs. Both overlays
+refuse to apply if the pinned production prompt or tool-schema hashes change. Policy v2 trials require
+`--expected-revision`; the image label and immutable image ID are recorded (traceability, not build provenance).
+`python evaluation/rme1/drill.py policy --image <ref> --expected-revision <rev>` is the non-LLM check of this path.
