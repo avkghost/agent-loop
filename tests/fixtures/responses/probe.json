@@ -1,0 +1,70 @@
+{
+ "completed": {
+  "status": "completed",
+  "usage": {
+   "input_tokens": 331,
+   "input_tokens_details": {
+    "cached_tokens": 0
+   },
+   "output_tokens": 25,
+   "output_tokens_details": {
+    "reasoning_tokens": 24
+   },
+   "total_tokens": 356
+  }
+ },
+ "completed_at_s": 4.01,
+ "elapsed_s": 4.01,
+ "endpoint": "/v1/responses",
+ "error": null,
+ "event_types": {
+  "response.completed": 1,
+  "response.content_part.added": 2,
+  "response.content_part.done": 2,
+  "response.created": 1,
+  "response.function_call_arguments.done": 1,
+  "response.in_progress": 1,
+  "response.output_item.added": 3,
+  "response.output_item.done": 3,
+  "response.output_text.delta": 1,
+  "response.output_text.done": 1,
+  "response.reasoning_text.delta": 24,
+  "response.reasoning_text.done": 1
+ },
+ "first_event_s": 0.02,
+ "first_reasoning_s": 1.23,
+ "first_text_s": 2.57,
+ "first_tool_fragment_s": 3.95,
+ "function_call": null,
+ "http_status": 200,
+ "request": {
+  "input": "Call the get_status tool for service alpha. Do not answer in text; make the tool call.",
+  "max_output_tokens": 2048,
+  "model": "qwen/qwen3.8-27b",
+  "reasoning": {
+   "effort": "low"
+  },
+  "stream": true,
+  "temperature": 0.2,
+  "tool_choice": "auto",
+  "tools": [
+   {
+    "description": "Report the status of a named service. Harmless; it is never executed in this probe.",
+    "name": "get_status",
+    "parameters": {
+     "additionalProperties": false,
+     "properties": {
+      "service": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "service"
+     ],
+     "type": "object"
+    },
+    "type": "function"
+   }
+  ]
+ }
+}
