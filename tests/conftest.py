@@ -94,7 +94,8 @@ def fake_post(monkeypatch):
 
 def _async_dispatch(sync_fn):
     """Awaitable stand-in for dispatch_tool_async that routes every local tool to a sync fake."""
-    async def dispatch_async(tool_name, tool_input, mcp_client=None, event_loop=None, allowed_tools=None):
+    async def dispatch_async(tool_name, tool_input, mcp_client=None, event_loop=None, allowed_tools=None,
+                              authorization=None):
         return sync_fn(tool_name, tool_input)
     return dispatch_async
 

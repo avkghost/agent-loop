@@ -7,6 +7,7 @@ import uuid
 from pathlib import Path
 
 from . import config, loop, jobs
+from .runtime import AgentRuntime, SessionError, load_mcp_config
 from .config_loader import load_config, apply_config_overrides
 from .session import SESSION_FORMAT, SessionLoadError, SessionValidationError, list_sessions, load_session, validate_session_data, resume_history
 from .execution import ExecutionJournal
@@ -92,6 +93,16 @@ def _report(outcome) -> None:
     print(f"\n🧾 Run {outcome.run_id}: {outcome.status} — {outcome.reason}")
 
 
+def _close_repl(runtime, repl_session) -> None:
+    """Close the REPL session and shut the runtime down. A refusal or failure is reported, not raised."""
+    try:
+        if repl_session is not None:
+            repl_session.close()
+        runtime.shutdown()
+    except SessionError as e:
+        print(f"❌ {e}")
+
+
 def main(args=None):
     """Main CLI entry point. Managed jobs still running when the runtime exits are terminated."""
     try:
@@ -132,27 +143,14 @@ def _main(args=None):
         _report(loop.agent_loop(goal, session_id=session_id))
 
     elif command == "repl":
-        # Interactive REPL with persistent MCP connections
+        # One stable session for every goal in this REPL; it closes (and stops its jobs) on exit
         print("🔄 Starting interactive agent loop (type 'exit' or 'quit' to exit)")
-
-        # Set up MCP connections once
-        mcp_client = MCPClientManager()
-        event_loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(event_loop)
-
+        runtime = AgentRuntime(mcp_config=load_mcp_config())
+        asyncio.set_event_loop(runtime.event_loop)
+        repl_session = None
         try:
-            import json
-            from pathlib import Path
-            config_path = Path("mcp_servers.json")
-            if config_path.exists():
-                with open(config_path) as f:
-                    mcp_config = json.load(f)
-            else:
-                mcp_config = {}
-
-            event_loop.run_until_complete(mcp_client.connect_all(mcp_config))
-
-            # REPL loop
+            repl_session = runtime.open_session()
+            print(f"🧭 Session: {repl_session.session_id}")
             while True:
                 try:
                     goal = input("\n🎯 Enter goal (or 'exit'/'quit' to exit): ").strip()
@@ -161,14 +159,29 @@ def _main(args=None):
                     if not goal:
                         continue
 
-                    session_id = str(uuid.uuid4())
-                    _report(loop.agent_loop(goal, session_id=session_id))
+                    task = runtime.event_loop.create_task(repl_session.run_goal(goal))
+                    try:
+                        outcome = runtime.event_loop.run_until_complete(task)
+                    except KeyboardInterrupt:
+                        # A goal interrupted inside its own run has already recorded itself and cleared its
+                        # busy flag. Only a goal still pending is cancelled through its own path. A finished
+                        # task must not be awaited again: the loop would wait forever on it.
+                        if not task.done():
+                            task.cancel()
+                            try:
+                                runtime.event_loop.run_until_complete(task)
+                            except asyncio.CancelledError:
+                                pass
+                        raise
+                    _report(outcome)
                 except KeyboardInterrupt:
                     print("\n\nExiting...")
                     break
+                except SessionError as e:
+                    print(f"❌ {e}")
+                    break
         finally:
-            event_loop.run_until_complete(mcp_client.close_all())
-            event_loop.close()
+            _close_repl(runtime, repl_session)
 
     elif command == "resume":
         try:

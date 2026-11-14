@@ -39,6 +39,7 @@ from collections import deque
 from typing import Any, Dict, List, Optional
 
 from . import config, envelope
+from .authorization import SessionAuthorization
 from .job_output import OutputBuffer, READ_CHUNK, decode_cursor, encode_cursor
 from .job_runtime import CLOSED, RuntimeGate, RuntimeRefused, WorkerRuntime
 from .tools import shell as _shell
@@ -186,9 +187,10 @@ class _Manager:
 
     # -- tool operations ----------------------------------------------------
 
-    async def handle(self, tool: str, owner: str, args: Dict[str, Any]) -> Dict[str, Any]:
+    async def handle(self, tool: str, owner: str, args: Dict[str, Any],
+                     authorization: Optional[SessionAuthorization] = None) -> Dict[str, Any]:
         if tool == "start_job":
-            return await self._start(owner, args["command"], args.get("lifetime_seconds"))
+            return await self._start(owner, args["command"], args.get("lifetime_seconds"), authorization)
         job = self._owned(owner, args["job_id"])
         if job is None:
             return _not_found()
@@ -205,7 +207,8 @@ class _Manager:
         job = self.jobs.get(job_id)
         return job if job is not None and job.owner == owner else None
 
-    async def _start(self, owner: str, command: str, lifetime: Optional[int]) -> Dict[str, Any]:
+    async def _start(self, owner: str, command: str, lifetime: Optional[int],
+                     authorization: Optional[SessionAuthorization] = None) -> Dict[str, Any]:
         if self.closing:
             return envelope.error_validation(
                 "Managed jobs are unavailable: the runtime is shutting down. No job was started.", fixable=False)
@@ -219,7 +222,7 @@ class _Manager:
             return envelope.error_validation(
                 f"Error: {len(self.retained)} earlier job(s) could not be confirmed stopped, so no new job was "
                 "started. They are still tracked for cleanup.", fixable=False)
-        early, spawn, uses_shell = _shell.validate_command(command)
+        early, spawn, uses_shell = _shell.validate_command(command, authorization)
         if early is not None:
             return early
         if shutil.which("ps") is None:
@@ -607,7 +610,8 @@ def unbind_owner(token: contextvars.Token) -> None:
     owner_var.reset(token)
 
 
-async def call_tool(tool_name: str, tool_input: Any) -> Dict[str, Any]:
+async def call_tool(tool_name: str, tool_input: Any,
+                    authorization: Optional[SessionAuthorization] = None) -> Dict[str, Any]:
     """Awaitable entry used by the agent loop. The worker does the work; a caller's cancellation only
     stops this caller from waiting. It never interrupts a start, a termination, or its cleanup."""
     owner = owner_var.get()
@@ -620,13 +624,14 @@ async def call_tool(tool_name: str, tool_input: Any) -> Dict[str, Any]:
         runtime = _GATE.acquire()
     except RuntimeRefused as e:
         return _refusal(e)
-    future = runtime.worker.submit(runtime.manager.handle(tool_name, owner, tool_input))
+    future = runtime.worker.submit(runtime.manager.handle(tool_name, owner, tool_input, authorization))
     if future is None:
         return _refusal(RuntimeRefused("Managed jobs are unavailable: the runtime has shut down."))
     return await asyncio.shield(asyncio.wrap_future(future))
 
 
-def call_tool_sync(tool_name: str, tool_input: Any) -> Dict[str, Any]:
+def call_tool_sync(tool_name: str, tool_input: Any,
+                   authorization: Optional[SessionAuthorization] = None) -> Dict[str, Any]:
     """Blocking entry for synchronous callers. Never call it from the worker thread."""
     owner = owner_var.get()
     if owner is None:
@@ -638,20 +643,66 @@ def call_tool_sync(tool_name: str, tool_input: Any) -> Dict[str, Any]:
         runtime = _GATE.acquire()
     except RuntimeRefused as e:
         return _refusal(e)
-    future = runtime.worker.submit(runtime.manager.handle(tool_name, owner, tool_input))
+    future = runtime.worker.submit(runtime.manager.handle(tool_name, owner, tool_input, authorization))
     if future is None:
         return _refusal(RuntimeRefused("Managed jobs are unavailable: the runtime has shut down."))
     return future.result()
 
 
-async def end_session(owner: str) -> None:
-    """Terminate the owner's running jobs when its agent run ends. Shielded: the stop always completes."""
+def _session_timeout_entry(owner: str, timeout: float) -> Dict[str, Any]:
+    return {"job_id": None, "state": "session", "leader_pid": None,
+            "reason": f"job cleanup for session {owner} did not finish within {timeout} seconds; "
+                      "its jobs may still be running"}
+
+
+def _report_unresolved(unresolved: List[Dict[str, Any]]) -> None:
+    for entry in unresolved:
+        if entry["job_id"] is None:
+            print(f"agent-loop: {entry['reason']}")
+        else:
+            print(f"agent-loop: job {entry['job_id']} could not be confirmed stopped at session close "
+                  f"(leader pid {entry['leader_pid']}); its processes may still be running.")
+
+
+def close_session_jobs(owner: str, timeout: Optional[float] = None) -> List[Dict[str, Any]]:
+    """Terminate the jobs owned by one session. Bounded: a stop that is not finished in time is reported
+    as unresolved, and the stop itself keeps running on the worker. Other sessions' jobs are untouched."""
+    timeout = config.JOB_SHUTDOWN_TIMEOUT_SECONDS if timeout is None else timeout
     runtime = _GATE.running()
     if runtime is None:
-        return
+        return []
     future = runtime.worker.submit(runtime.manager.shutdown(owner, "owning session ended"))
-    if future is not None:
-        await asyncio.shield(asyncio.wrap_future(future))
+    if future is None:
+        return []
+    try:
+        unresolved = list(future.result(timeout=timeout))
+    except concurrent.futures.TimeoutError:
+        unresolved = [_session_timeout_entry(owner, timeout)]
+    _report_unresolved(unresolved)
+    return unresolved
+
+
+async def end_session(owner: str) -> List[Dict[str, Any]]:
+    """Terminate the owner's jobs when a one-shot run ends. Bounded, and the stop is always attempted.
+    Returns the diagnostics for stops that could not be confirmed."""
+    runtime = _GATE.running()
+    if runtime is None:
+        return []
+    future = runtime.worker.submit(runtime.manager.shutdown(owner, "owning session ended"))
+    if future is None:
+        return []
+    timeout = config.JOB_SHUTDOWN_TIMEOUT_SECONDS
+    try:
+        unresolved = list(await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout))
+    except asyncio.TimeoutError:
+        unresolved = [_session_timeout_entry(owner, timeout)]
+    _report_unresolved(unresolved)
+    return unresolved
+
+
+def runtime_state() -> Optional[str]:
+    """The job runtime's state (running, closing, closed), or None before first use."""
+    return _GATE.state()
 
 
 def shutdown_runtime(timeout: Optional[float] = None) -> List[Dict[str, Any]]:

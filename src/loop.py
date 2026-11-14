@@ -9,6 +9,7 @@ from typing import Any, Optional
 from . import config, envelope, prompts, dispatch, render, compaction, session, execution, jobs, stream
 from . import provider as provider_mod
 from . import runs
+from .authorization import SessionAuthorization
 from .tools import get_all_tools
 from .tools.mcp_client import MCPClientManager
 
@@ -118,7 +119,19 @@ def _answer_interrupted_calls(messages):
     return messages
 
 
-async def _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, allowed_tools):
+def _grant_kind(kind: str) -> str:
+    """Map a permission request kind to the session authorization kind."""
+    return {"command": "command", "shell_command": "shell", "mcp_tool": "mcp"}[kind]
+
+
+def _grant_identifier(kind: str, identifier: str, observation: dict) -> str:
+    """Shell grants are the exact command text; command and MCP grants are the tool name."""
+    if kind == "shell_command":
+        return observation.get("command", "")
+    return identifier
+
+
+async def _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, allowed_tools, authorization=None):
     """Dispatch one call inside the running loop. An explicit tool failure becomes a terminal result.
 
     Only ToolExecutionError is converted. Other exceptions are programming defects and propagate.
@@ -127,7 +140,8 @@ async def _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, allowe
     the await runs on the loop that is already active.
     """
     try:
-        return await dispatch.dispatch_tool_async(tool_name, tool_input, mcp_client, event_loop, allowed_tools=allowed_tools)
+        return await dispatch.dispatch_tool_async(tool_name, tool_input, mcp_client, event_loop,
+                                                  allowed_tools=allowed_tools, authorization=authorization)
     except dispatch.ToolExecutionError as e:
         return envelope.error_unknown_outcome(
             f"Tool '{tool_name}' raised {type(e).__name__}: {e}. Its outcome is unknown and it was not retried. "
@@ -187,10 +201,19 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
                             session_id: Optional[str] = None, resume_messages: Optional[list] = None,
                             resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
                             resume_execution: Optional[list] = None, resume_runs: Optional[list] = None,
-                            resume_evidence: Optional[list] = None, legacy_history: bool = False) -> "runs.RunOutcome":
-    """Run one agent goal in a session and return its RunOutcome. Managed jobs started here belong to this
-    session and are terminated when it ends."""
-    owner = session_id or f"run-{uuid.uuid4().hex}"
+                            resume_evidence: Optional[list] = None, legacy_history: bool = False,
+                            authorization: Optional[SessionAuthorization] = None, owner: Optional[str] = None,
+                            keep_jobs: bool = False, session_goal: Optional[str] = None,
+                            continuation: bool = False) -> "runs.RunOutcome":
+    """Run one agent goal and return its RunOutcome.
+
+    One-shot callers (keep_jobs=False) own their jobs: they are terminated when this run ends. A session
+    passes keep_jobs=True and a stable owner, so its jobs survive run boundaries and are closed by the
+    session. continuation=True appends user_goal to a restored history; session_goal keeps the stored goal.
+    """
+    owner = owner or session_id or f"run-{uuid.uuid4().hex}"
+    if authorization is None:
+        authorization = SessionAuthorization.from_config()
     token = jobs.bind_owner(owner)
     provider = provider_mod.make_provider()
     try:
@@ -199,13 +222,15 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
             session_id=session_id, resume_messages=resume_messages,
             resume_objective=resume_objective, resume_summary=resume_summary,
             resume_execution=resume_execution, provider=provider, resume_runs=resume_runs,
-            resume_evidence=resume_evidence, legacy_history=legacy_history)
+            resume_evidence=resume_evidence, legacy_history=legacy_history,
+            authorization=authorization, session_goal=session_goal, continuation=continuation)
     finally:
         try:
             await provider.aclose()
         finally:
             try:
-                await jobs.end_session(owner)
+                if not keep_jobs:
+                    await jobs.end_session(owner)
             finally:
                 jobs.unbind_owner(token)
 
@@ -227,14 +252,15 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                           resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
                           resume_execution: Optional[list] = None, provider: Optional[Any] = None,
                           resume_runs: Optional[list] = None, resume_evidence: Optional[list] = None,
-                          legacy_history: bool = False) -> "runs.RunOutcome":
+                          legacy_history: bool = False, authorization: Optional[SessionAuthorization] = None,
+                          session_goal: Optional[str] = None, continuation: bool = False) -> "runs.RunOutcome":
     """Run one goal. Every exit path records a status; the final state is persisted before this returns."""
     ctx = _RunContext(user_goal, resume_runs or [], resume_evidence or [], legacy_history)
     try:
         await _run_body(user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override,
                         session_id=session_id, resume_messages=resume_messages, resume_objective=resume_objective,
                         resume_summary=resume_summary, resume_execution=resume_execution, provider=provider,
-                        ctx=ctx)
+                        ctx=ctx, authorization=authorization, session_goal=session_goal, continuation=continuation)
     except asyncio.CancelledError:
         ctx.recorder.end(runs.RunStatus.INTERRUPTED, "the run was cancelled before it finished")
         raise
@@ -257,7 +283,8 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                     session_id: Optional[str] = None, resume_messages: Optional[list] = None,
                     resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
                     resume_execution: Optional[list] = None, provider: Optional[Any] = None,
-                    ctx: Optional["_RunContext"] = None) -> None:
+                    ctx: Optional["_RunContext"] = None, authorization: Optional[SessionAuthorization] = None,
+                    session_goal: Optional[str] = None, continuation: bool = False) -> None:
     """Main agent loop (async version for MCP support).
 
     Args:
@@ -269,6 +296,8 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
     """
     if provider is None:
         provider = provider_mod.make_provider()
+    if authorization is None:
+        authorization = SessionAuthorization.from_config()
 
     # Use override system prompt if provided, otherwise use default
     system_prompt = system_prompt_override if system_prompt_override else prompts.SYSTEM_PROMPT
@@ -303,6 +332,9 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
             {"role": "system", "content": system_prompt},
             {"role": "user", "content": f"Objective: {user_goal}"}
         ]
+    if continuation:
+        # A later goal in a live session: the objective and history stay, the new goal is appended
+        messages.append({"role": "user", "content": f"Next goal: {user_goal}"})
 
     def _persist():
         """Save the history after every appended message, so an interruption loses nothing recorded."""
@@ -310,7 +342,7 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
             return True
         try:
             session.save_session(
-                session_id, user_goal, messages,
+                session_id, session_goal if session_goal is not None else user_goal, messages,
                 objective=state.objective,
                 summary=state.summary,
                 execution=journal.to_dicts(),
@@ -519,7 +551,7 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                         ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, "the session could not be saved; durability is unknown")
                         return
 
-                    observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override)
+                    observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override, authorization)
 
                     # --- HANDLE PERMISSION REQUEST ---
                     if isinstance(observation, dict) and observation.get("requiresPermission"):
@@ -527,7 +559,7 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                         identifier = observation.get("identifier", "")
 
                         # In ALLOW_ALL mode, auto-approve all permissions
-                        if config.ALLOW_ALL:
+                        if authorization.allow_all:
                             render.print_permission_result("✅ ALLOW_ALL mode: Approved.")
                             choice_input = "2"  # Session approval
                         else:
@@ -539,11 +571,9 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                             render.print_permission_result("✅ Allowed for this use only.")
                             # Re-execute without permission gate
                             if kind in ["command", "shell_command", "mcp_tool"]:
-                                # Mark shell commands as approved for this attempt
-                                if kind == "shell_command":
-                                    from .tools.shell import mark_shell_command_approved
-                                    mark_shell_command_approved(observation.get("command", ""))
-                                observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override)
+                                # One attempt only: the grant is consumed by the re-dispatch
+                                authorization.grant_once(_grant_kind(kind), _grant_identifier(kind, identifier, observation))
+                                observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override, authorization)
                             # Convert envelope dict to JSON string for the model
                             if isinstance(observation, dict) and "isError" in observation:
                                 observation_str = envelope.serialize_for_model(observation)
@@ -553,16 +583,11 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
 
                         elif choice_input == "2":
                             render.print_permission_result("✅ Added to allowed list for this session.")
-                            if kind == "command":
-                                config.ALLOWED_TOOLS.add(identifier)
-                            elif kind == "mcp_tool":
-                                config.ALLOWED_MCP_TOOLS.add(identifier)
-                            elif kind == "shell_command":
-                                from .tools.shell import mark_shell_command_approved
-                                mark_shell_command_approved(observation.get("command", ""))
+                            if kind in ["command", "shell_command", "mcp_tool"]:
+                                authorization.grant(_grant_kind(kind), _grant_identifier(kind, identifier, observation))
 
                             # Re-execute now that it's in the allowed list
-                            observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override)
+                            observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override, authorization)
                             # Convert envelope dict to JSON string for the model
                             if isinstance(observation, dict) and "isError" in observation:
                                 observation_str = envelope.serialize_for_model(observation)

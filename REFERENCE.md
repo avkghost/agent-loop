@@ -79,6 +79,8 @@ python3 agent_loop.py repl
 # Enter multiple goals, each building on the previous
 ```
 
+All goals entered in one `repl` run share one session. Background jobs started by a goal keep running for later goals in that session. Leaving the REPL closes the session and stops its jobs. Approvals given with "Yes, this session" last for that session only.
+
 ### Targeted: Use agent expertise
 ```bash
 python3 agent_loop.py agent coder "Implement user authentication with JWT"

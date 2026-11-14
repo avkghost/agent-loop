@@ -76,7 +76,8 @@ def _drive(monkeypatch, responses, dispatch_fn, *, summarizer=None, session_id=N
     monkeypatch.setattr(scripted_provider, "POST", post)
     monkeypatch.setattr(loop, "load_project_guidelines", lambda: None)
     monkeypatch.setattr(dispatch, "dispatch_tool", dispatch_fn)
-    async def _dispatch_async(tool_name, tool_input, mcp_client=None, event_loop=None, allowed_tools=None):
+    async def _dispatch_async(tool_name, tool_input, mcp_client=None, event_loop=None, allowed_tools=None,
+                                   authorization=None):
         return dispatch_fn(tool_name, tool_input)
     monkeypatch.setattr(dispatch, "dispatch_tool_async", _dispatch_async)
     for name, value in config_overrides.items():

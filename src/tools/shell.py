@@ -30,6 +30,7 @@ import time
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import config, envelope
+from ..authorization import SessionAuthorization
 
 DEFAULT_TIMEOUT_SECONDS = 120
 MIN_TIMEOUT_SECONDS = 1
@@ -41,8 +42,6 @@ MODEL_STREAM_BYTES = 16 << 10   # head and tail kept per stream for the model an
 _READ_CHUNK = 64 << 10
 _POLL_SECONDS = 0.02
 
-# Track approved shell commands for the session
-_APPROVED_SHELL_COMMANDS = set()
 
 _DETACHING_COMMANDS = {"nohup", "setsid", "disown", "screen", "tmux", "at", "batch"}
 _DOUBLE_QUOTE_ESCAPES = set('"\\$`\n')
@@ -562,13 +561,16 @@ async def _run(spawn: List[str], uses_shell: bool, timeout: int) -> Dict[str, An
     return await _complete(_terminate(proc, readers, transports, outcome, timeout))
 
 
-def validate_command(command_str: str) -> Tuple[Optional[Dict[str, Any]], Optional[List[str]], bool]:
+def validate_command(command_str: str, authorization: Optional[SessionAuthorization] = None
+                     ) -> Tuple[Optional[Dict[str, Any]], Optional[List[str]], bool]:
     """Validation shared by foreground commands and managed jobs. Starts nothing.
 
     Returns (early_result, spawn, uses_shell). early_result is a validation error or a permission
     request to return unchanged; otherwise spawn is the Popen target (argv, or [shell_string]).
+    authorization is the calling session's policy. None means the CLI snapshot, with no grants kept.
     """
-    global _APPROVED_SHELL_COMMANDS
+    if authorization is None:
+        authorization = SessionAuthorization.from_config()
 
     if os.name != "posix":
         return envelope.error_validation(
@@ -591,19 +593,17 @@ def validate_command(command_str: str) -> Tuple[Optional[Dict[str, Any]], Option
     # Check if command uses shell operators
     uses_shell = _has_shell_operators(command_str)
 
-    # If shell operators detected and not approved, request permission
-    if uses_shell and command_str not in _APPROVED_SHELL_COMMANDS:
-        if not config.ALLOW_ALL:
-            return {
-                "requiresPermission": True,
-                "kind": "shell_command",
-                "identifier": "shell_operators",
-                "command": command_str,
-                "description": "This command uses shell operators (pipes |, redirects >, logical operators &&/||). Approval required."
-            }, None, False
-        else:
-            print(f"⚠️ ALLOW_ALL MODE: Executing shell command with operators")
-            _APPROVED_SHELL_COMMANDS.add(command_str)
+    # Shell operators need an exact-command grant from this session (or allow-all)
+    if uses_shell and not authorization.allows("shell", command_str):
+        return {
+            "requiresPermission": True,
+            "kind": "shell_command",
+            "identifier": "shell_operators",
+            "command": command_str,
+            "description": "This command uses shell operators (pipes |, redirects >, logical operators &&/||). Approval required."
+        }, None, False
+    if uses_shell and authorization.allow_all:
+        print(f"⚠️ ALLOW_ALL MODE: Executing shell command with operators")
 
     if uses_shell:
         return None, [command_str], True
@@ -631,25 +631,25 @@ def validate_command(command_str: str) -> Tuple[Optional[Dict[str, Any]], Option
     if base_cmd in config.SEARCH_COMMANDS:
         config.HAS_SEARCHED_CODEBASE = True
 
-    # Check if command is allowed
-    if base_cmd not in config.ALLOWED_TOOLS:
-        if config.ALLOW_ALL:
-            print(f"⚠️ ALLOW_ALL MODE: Executing unauthorized command: {base_cmd}")
-        else:
-            # Return permission request sentinel (not an error envelope)
-            return {
-                "requiresPermission": True,
-                "kind": "command",
-                "identifier": base_cmd,
-                "arguments": tokens[1:] if len(tokens) > 1 else []
-            }, None, False
+    # Check if command is allowed by this session's policy
+    if not authorization.allows("command", base_cmd):
+        # Return permission request sentinel (not an error envelope)
+        return {
+            "requiresPermission": True,
+            "kind": "command",
+            "identifier": base_cmd,
+            "arguments": tokens[1:] if len(tokens) > 1 else []
+        }, None, False
+    if authorization.allow_all and base_cmd not in config.ALLOWED_TOOLS:
+        print(f"⚠️ ALLOW_ALL MODE: Executing unauthorized command: {base_cmd}")
     return None, tokens, False
 
 
-async def execute_command_async(command_str: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+async def execute_command_async(command_str: str, timeout_seconds: Optional[int] = None,
+                                authorization: Optional[SessionAuthorization] = None) -> Dict[str, Any]:
     """Run a foreground command without blocking the event loop."""
     if os.name != "posix" or not (command_str or "").strip():
-        early, _, _ = validate_command(command_str)
+        early, _, _ = validate_command(command_str, authorization)
         return early
 
     timeout_error = _timeout_error(timeout_seconds)
@@ -657,24 +657,13 @@ async def execute_command_async(command_str: str, timeout_seconds: Optional[int]
         return timeout_error
     timeout = DEFAULT_TIMEOUT_SECONDS if timeout_seconds is None else timeout_seconds
 
-    early, spawn, uses_shell = validate_command(command_str)
+    early, spawn, uses_shell = validate_command(command_str, authorization)
     if early is not None:
         return early
     return await _run(spawn, uses_shell, timeout)
 
 
-def execute_command(command_str: str, timeout_seconds: Optional[int] = None) -> Dict[str, Any]:
+def execute_command(command_str: str, timeout_seconds: Optional[int] = None,
+                    authorization: Optional[SessionAuthorization] = None) -> Dict[str, Any]:
     """Synchronous entry point for callers outside the agent loop. Never call it from inside one."""
-    return asyncio.run(execute_command_async(command_str, timeout_seconds))
-
-
-def mark_shell_command_approved(command_str: str) -> None:
-    """Mark a shell command as approved for the session."""
-    global _APPROVED_SHELL_COMMANDS
-    _APPROVED_SHELL_COMMANDS.add(command_str)
-
-
-def clear_approved_commands() -> None:
-    """Clear the approved commands list (useful for testing)."""
-    global _APPROVED_SHELL_COMMANDS
-    _APPROVED_SHELL_COMMANDS.clear()
+    return asyncio.run(execute_command_async(command_str, timeout_seconds, authorization))

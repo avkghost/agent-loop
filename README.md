@@ -186,6 +186,8 @@ Then enter goals interactively:
 🎯 Enter goal (or 'exit'/'quit' to exit): exit
 ```
 
+The REPL keeps **one session** for every goal you enter. Conversation history, run records, and session-local approvals carry from one goal to the next, and each goal is saved as its own run. Background jobs started by one goal stay running after that goal finishes, so a later goal can check, collect, or stop them. Ctrl-C cancels the goal that is running and records it as interrupted; the session stays open. Leaving the REPL closes the session, which stops its background jobs, closes its MCP connections, and then shuts the runtime down.
+
 #### 3. **Run with a named agent**
 Use a specific agent persona with predefined system prompt and tool access:
 ```bash
@@ -540,7 +542,7 @@ When messages exceed 80% of `MAX_TOKENS`:
 
 Compaction runs at most once per loop iteration and never re-dispatches a tool.
 
-Sessions saved by the current runtime use format 4, with `objective`, `summary`, `messages`, and durable `execution` records persisted as separate fields. Format 3 sessions may resume without execution history; clean objective-only format 2 or unversioned sessions may also resume. Legacy histories containing merged summary markers are rejected as ambiguous rather than reinterpreted.
+Sessions saved by the current runtime use format 5, with `objective`, `summary`, `messages`, durable `execution` records, `runs`, `evidence`, and `legacy_history` persisted as separate fields. Format 4 sessions resume with their conversation and execution records, but without recorded run history. Format 3 sessions may resume without execution history. Clean objective-only format 2 or unversioned sessions may also resume. Legacy histories containing merged summary markers are rejected as ambiguous rather than reinterpreted. Any other format is rejected.
 
 ### Tool Failures, Interruptions, and Limits
 
@@ -558,7 +560,7 @@ Sessions saved by the current runtime use format 4, with `objective`, `summary`,
 - **Timeouts and cancellation.** On timeout or cancellation the command's process group is stopped: SIGTERM, then SIGKILL after 5 s if the group is not empty. Cleanup runs to completion even if the command is cancelled again; the cancellation then propagates. A leader is reaped only after its group is confirmed empty. Group membership is read from the process table (`ps`), zombies are ignored, and a failed or unavailable membership check is never treated as an empty group. A timeout is `unknown_outcome` and is not retried. Descendants that stay in the group are stopped. Descendants that start their own session (`setsid`, daemons) leave the group and are not tracked.
 - **Unconfirmed stops.** A leader whose group could not be confirmed empty is retained, still unreaped, so its process-group id stays reserved. Retained groups are retried on later commands and are SIGKILLed at normal exit. At most 8 may be retained: while the cap is reached, new commands are refused before anything starts, and no retained process is discarded. If another part of the process reaps a command's leader, the command is reported as `unknown_outcome`, its group is not signalled, and its exit status is not claimed. SIGKILL of the agent process, power loss, and a process-group id reused in the narrow window between a leader's exit and its reap are not covered.
 - **Platforms.** POSIX systems only (developed and tested on macOS and Linux). Shell execution requires `ps` (procps) to verify process groups; it is refused before anything starts if `ps` is missing. Shell execution is refused on other systems rather than run with weaker guarantees.
-- **Approval and allowlist.** `kill`, `jobs`, `bg`, and `fg` are no longer automatically allowed; using them requires approval. Commands with shell operators still require one-time approval and run through `/bin/sh`.
+- **Approval and allowlist.** Approvals belong to the session in which they were given. "Yes, only" applies to a single invocation, and it is not remembered. "Yes, this session" is remembered for the rest of that live session, across its goals, and never reaches another session. A command with shell operators is approved by its exact text only. Approvals are not saved in the session file: a resumed session, or a new process, starts again from the configured policy. `kill`, `jobs`, `bg`, and `fg` are not automatically allowed; using them requires approval. Commands with shell operators run through `/bin/sh` after approval.
 
 **Example (illustrative, not a measured run):**
 ```
@@ -586,7 +588,7 @@ Recoverable tool errors do not end a run. The model sees the error and can conti
 
 **Evidence** records are runtime observations taken from the execution journal. Each names the journal call it came from, and each carries a short summary, never the tool's output. A completed call is a success observation, and an unknown call is an unknown observation, never a success. A model's own statements are not evidence, so a run is never verified because its output says so.
 
-**Session format 5** stores runs and evidence next to the conversation and the journal. Format 4 sessions still load, and their earlier history is recorded as unrecorded (`legacy_history`). Nothing is reconstructed for them. A run that was still open when the process ended is recovered as `interrupted`, and it is never re-executed.
+**Session format 5** stores runs and evidence next to the conversation and the journal. Sessions in formats 2 to 4 still load, and their earlier history is recorded as unrecorded (`legacy_history`). Nothing is reconstructed for them. A run that was still open when the process ended is recovered as `interrupted`, and it is never re-executed.
 
 ### Managed Background Jobs
 
@@ -607,13 +609,13 @@ For a long-running local process (a server, a watcher), the agent starts a **man
 
 **Ownership and lifetime.**
 - A job belongs to the agent session that started it. Other sessions get the same "not found" answer for any id they do not own.
-- A job lives across the model's turns in that session. It is terminated when the session ends, and every job is terminated at runtime shutdown.
+- A job survives the end of each goal in its session, so a later goal in the same session can call `status_job`, `collect_job`, or `terminate_job` on it. Closing the session (the REPL on exit, or the end of a one-shot run) terminates the session's jobs within a bounded time. A stop that cannot be confirmed is reported, not dropped. Every job is terminated at runtime shutdown.
 - Jobs are not saved in the session file. A resumed session cannot see or restart an earlier job, and nothing is restarted automatically.
 - Each job has a lifetime watchdog (default 600 s, at most 3600 s). It runs on its own worker thread, so it fires even while a model request is blocking the agent.
 
 **Cursors.** A cursor is opaque and authenticated. It is valid only for the job that issued it and only for the current runtime. A forged, altered, or foreign cursor gets one generic answer that reveals nothing about the other job. A cursor older than the buffer is accepted, and the dropped bytes are reported.
 
-**Shutdown and failures.** Runtime shutdown is idempotent. Once it begins, new work is refused until it completes, and a closed runtime is never reopened implicitly. Failures in a job's helper tasks are recorded in diagnostics and never left unretrieved. If output capture, lifetime enforcement, or leader supervision fails, the job is stopped rather than left unmanaged.
+**Shutdown and failures.** Runtime shutdown is refused while any session is running a goal. The refusal names the busy sessions, nothing is closed, and the runtime stays usable: finish or cancel the goal, then shut down again. Once a shutdown is accepted, no session can start a goal. If a session's jobs or MCP connections cannot be confirmed closed, the runtime stays pending, keeps its job worker and event loop, and a later shutdown retries only what is still unconfirmed. A completed shutdown is idempotent, and a closed runtime is never reopened implicitly. Failures in a job's helper tasks are recorded in diagnostics and never left unretrieved. If output capture, lifetime enforcement, or leader supervision fails, the job is stopped rather than left unmanaged.
 
 **Output.** Each stream keeps at most 1 MiB in memory. Older bytes are dropped first, and `collect_job` reports how many bytes were dropped. Output is drained continuously, so a chatty job cannot block on a full pipe.
 
