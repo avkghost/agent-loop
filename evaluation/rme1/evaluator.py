@@ -64,7 +64,8 @@ def run_hidden_check(scenario: Scenario, workspace: Path, evaluator_dir: Path) -
     script = write_hidden_check(scenario, evaluator_dir)
     try:
         # -B and PYTHONDONTWRITEBYTECODE keep the evaluator from writing bytecode into the evaluated tree
-        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        # RME_EVALUATOR_OUT lets a hidden check write its operational metrics to the host trial directory, never the workspace.
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1", RME_EVALUATOR_OUT=str(script.parent))
         proc = subprocess.run([sys.executable, "-B", str(script)], cwd=str(workspace), capture_output=True,
                               text=True, timeout=SHELL_TIMEOUT_SECONDS, env=env)
         passed = proc.returncode == 0 and "HIDDEN_PASS" in proc.stdout

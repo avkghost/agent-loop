@@ -108,7 +108,7 @@ SCENARIOS: Dict[str, Scenario] = {
 
 # The debug benchmarks are defined in evaluation/<dir>/spec.py (pure data, importable in the agent image). Its fixture and
 # hidden evaluator are host-only files, referenced by path and never read here. RME-01/02/03 above are unchanged.
-DEBUG_BENCHMARK_DIRS = ("rme_debug", "rme_debug_02")
+DEBUG_BENCHMARK_DIRS = ("rme_debug", "rme_debug_02", "rme_tradeoff_01")
 
 
 def _load_debug_spec(directory: Path):
