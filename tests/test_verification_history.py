@@ -273,3 +273,12 @@ def test_verification_budget_outside_the_supported_range_is_refused_before_any_m
     assert outcome.run_status is runs.RunStatus.NEEDS_ATTENTION
     assert "verification cycles" in outcome.reason
     assert post == [], "no model request may be made for a refused budget"
+
+
+def test_engine_never_verifies_criteria_owned_by_another_run():
+    """Defense in depth: even if a caller passes another run's trusted criterion, it must not produce a result here."""
+    import asyncio as _asyncio
+    foreign = acceptance.AcceptanceCriterion("foreign", "run_" + "b" * 32, "file_exists", True, "user",
+                                             parameters={"path": "."})
+    results = _asyncio.run(verification.VerificationEngine().verify([foreign], "run_" + "a" * 32, attempt=1, budget=1))
+    assert results == []
