@@ -76,15 +76,38 @@ def check_goal(goal: str) -> str:
     return goal
 
 
+# Provider-facing stand-in for a tool name that is missing or empty. It names no registered tool, so it
+# cannot be dispatched, and the call is answered by its rejection result as before.
+INVALID_CALL_NAME = "invalid_tool_call"
+
+
+def _provider_arguments(raw: Any) -> str:
+    """The arguments a provider-facing history may carry: the received string when it is a JSON object,
+    otherwise the inert object "{}". Valid objects are kept byte for byte. Nothing is inferred from a
+    malformed value, and the malformed original stays in the journal."""
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except ValueError:
+            return "{}"
+        if isinstance(parsed, dict):
+            return raw
+    return "{}"
+
+
 def _declare_tool_call(tool_call):
-    """Normalize a streamed tool call into the declaration shape sent back to the provider."""
+    """Declare a received tool call for the next provider request. The name is kept as received; a missing or
+    empty name is replaced by INVALID_CALL_NAME. Arguments follow _provider_arguments."""
     function = tool_call.get("function", {})
+    name = function.get("name")
+    if not isinstance(name, str) or not name:
+        name = INVALID_CALL_NAME
     return {
         "id": tool_call.get("id"),
         "type": "function",
         "function": {
-            "name": function.get("name"),
-            "arguments": function.get("arguments", "{}"),
+            "name": name,
+            "arguments": _provider_arguments(function.get("arguments", "{}")),
         },
     }
 
@@ -572,12 +595,13 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
             assistant_msg["tool_calls"] = [_declare_tool_call(tc) for tc in message["tool_calls"]]
         messages.append(assistant_msg)
         if message.get("tool_calls"):
-            for declared_call in assistant_msg["tool_calls"]:
-                function = declared_call.get("function", {})
+            # The journal records what the model actually sent, not the protocol declaration
+            for declared_call, received_call in zip(assistant_msg["tool_calls"], message["tool_calls"]):
+                received = received_call.get("function", {})
                 journal.register(
                     declared_call.get("id"),
-                    function.get("name") or "",
-                    function.get("arguments", "{}"),
+                    received.get("name") or "",
+                    received.get("arguments", "{}"),
                 )
         if not _persist():
             ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, "the session could not be saved after the model turn; durability is unknown")

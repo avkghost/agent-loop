@@ -33,3 +33,5 @@ node-compile-cache/
 # Backups
 *.bak
 .venv
+# Local evaluation artifacts (RME trials). Not part of the repository.
+/tmp/

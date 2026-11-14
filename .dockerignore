@@ -5,3 +5,13 @@ __pycache__
 .pytest_cache
 .agent_loop
 tests/docker/results
+
+# RME-1.1: local trial artifacts, other projects, and machine-local config stay out of the build context
+tmp/
+implementation/
+**/__pycache__/
+**/*.pyc
+.claude/
+.env
+.env.*
+mcp_servers.json

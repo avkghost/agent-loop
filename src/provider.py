@@ -48,11 +48,25 @@ class TokenUsage:
         return cls(prompt, completion, prompt + completion, "estimated")
 
 
+EXCERPT_CHARS = 200  # bounded diagnostic excerpt of an HTTP error body; never the request
+
+
+def _error_excerpt(text: Any) -> Optional[str]:
+    """The first EXCERPT_CHARS of a server error body with control characters removed. Only the response is
+    read here: request bodies, prompts, and headers (including credentials) are never passed in."""
+    if not isinstance(text, str) or not text:
+        return None
+    cleaned = "".join(ch if ch.isprintable() or ch in " \t" else " " for ch in text[:EXCERPT_CHARS * 4])
+    return " ".join(cleaned.split())[:EXCERPT_CHARS] or None
+
+
 @dataclass(frozen=True)
 class ProviderError:
     kind: str
     message: str
     status: Optional[int] = None
+    # Diagnostic only. Kept on the error object; the user-facing message does not include it.
+    excerpt: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -103,8 +117,9 @@ def build_payload(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str,
     return payload
 
 
-def failure(outcome: TurnOutcome, kind: str, message: str, status: Optional[int] = None) -> ProviderTurn:
-    return ProviderTurn(outcome=outcome, error=ProviderError(kind, message, status))
+def failure(outcome: TurnOutcome, kind: str, message: str, status: Optional[int] = None,
+            excerpt: Optional[str] = None) -> ProviderTurn:
+    return ProviderTurn(outcome=outcome, error=ProviderError(kind, message, status, excerpt))
 
 
 _OUTCOME_FOR_FINISH = {
@@ -284,7 +299,8 @@ class LMStudioProvider:
             if not options.stream:
                 response = await self._client.post(self._url, json=payload)
                 if response.status_code >= 400:
-                    return failure(TurnOutcome.HTTP_ERROR, "http", f"HTTP {response.status_code}", response.status_code)
+                    return failure(TurnOutcome.HTTP_ERROR, "http", f"HTTP {response.status_code}", response.status_code,
+                                   _error_excerpt(response.text))
                 try:
                     data = response.json()
                 except ValueError as e:
@@ -294,7 +310,8 @@ class LMStudioProvider:
             async with self._client.stream("POST", self._url, json=payload) as response:
                 if response.status_code >= 400:
                     await response.aread()
-                    return failure(TurnOutcome.HTTP_ERROR, "http", f"HTTP {response.status_code}", response.status_code)
+                    return failure(TurnOutcome.HTTP_ERROR, "http", f"HTTP {response.status_code}", response.status_code,
+                                   _error_excerpt(response.text))
                 parser = sse.StreamParser(on_text)
                 async for line in response.aiter_lines():
                     parser.feed(line)
