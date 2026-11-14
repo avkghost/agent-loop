@@ -8,6 +8,7 @@ from typing import Any, Optional
 
 from . import config, envelope, prompts, dispatch, render, compaction, session, execution, jobs, stream
 from . import provider as provider_mod
+from . import runs
 from .tools import get_all_tools
 from .tools.mcp_client import MCPClientManager
 
@@ -185,16 +186,20 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
                             system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
                             session_id: Optional[str] = None, resume_messages: Optional[list] = None,
                             resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
-                            resume_execution: Optional[list] = None) -> None:
-    """Run one agent session. Managed jobs started here belong to this session and are terminated when it ends."""
+                            resume_execution: Optional[list] = None, resume_runs: Optional[list] = None,
+                            resume_evidence: Optional[list] = None, legacy_history: bool = False) -> "runs.RunOutcome":
+    """Run one agent goal in a session and return its RunOutcome. Managed jobs started here belong to this
+    session and are terminated when it ends."""
     owner = session_id or f"run-{uuid.uuid4().hex}"
     token = jobs.bind_owner(owner)
     provider = provider_mod.make_provider()
     try:
-        await _agent_loop_run(user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override,
-                              session_id=session_id, resume_messages=resume_messages,
-                              resume_objective=resume_objective, resume_summary=resume_summary,
-                              resume_execution=resume_execution, provider=provider)
+        return await _agent_loop_run(
+            user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override,
+            session_id=session_id, resume_messages=resume_messages,
+            resume_objective=resume_objective, resume_summary=resume_summary,
+            resume_execution=resume_execution, provider=provider, resume_runs=resume_runs,
+            resume_evidence=resume_evidence, legacy_history=legacy_history)
     finally:
         try:
             await provider.aclose()
@@ -205,12 +210,54 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
                 jobs.unbind_owner(token)
 
 
+class _RunContext:
+    """What the run body reports to its wrapper: the recorder, prior history, and the persistence hook."""
+
+    def __init__(self, goal: str, prior_runs: list, prior_evidence: list, legacy_history: bool):
+        self.recorder = runs.RunRecorder(goal=goal)
+        self.prior_runs = list(prior_runs)
+        self.prior_evidence = list(prior_evidence)
+        self.legacy_history = legacy_history
+        self.persist = None  # set by the body once it can save the session
+
+
 async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_loop: asyncio.AbstractEventLoop,
-                            system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
-                            session_id: Optional[str] = None, resume_messages: Optional[list] = None,
-                            resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
-                            resume_execution: Optional[list] = None,
-                            provider: Optional[Any] = None) -> None:
+                          system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
+                          session_id: Optional[str] = None, resume_messages: Optional[list] = None,
+                          resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
+                          resume_execution: Optional[list] = None, provider: Optional[Any] = None,
+                          resume_runs: Optional[list] = None, resume_evidence: Optional[list] = None,
+                          legacy_history: bool = False) -> "runs.RunOutcome":
+    """Run one goal. Every exit path records a status; the final state is persisted before this returns."""
+    ctx = _RunContext(user_goal, resume_runs or [], resume_evidence or [], legacy_history)
+    try:
+        await _run_body(user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override,
+                        session_id=session_id, resume_messages=resume_messages, resume_objective=resume_objective,
+                        resume_summary=resume_summary, resume_execution=resume_execution, provider=provider,
+                        ctx=ctx)
+    except asyncio.CancelledError:
+        ctx.recorder.end(runs.RunStatus.INTERRUPTED, "the run was cancelled before it finished")
+        raise
+    except (KeyboardInterrupt, SystemExit) as e:
+        ctx.recorder.end(runs.RunStatus.INTERRUPTED, f"the run was interrupted ({type(e).__name__})")
+        raise
+    except Exception as e:
+        # Not swallowed: the error propagates after its outcome is recorded as unknown
+        ctx.recorder.end(runs.RunStatus.UNKNOWN, f"unexpected error: {type(e).__name__}: {str(e)[:150]}")
+        raise
+    finally:
+        outcome = ctx.recorder.finish()
+        if ctx.persist is not None and not ctx.persist():
+            print(f"⚠️  Run {outcome.run_id} finished with status {outcome.status}, but its final state was not saved.")
+    return outcome
+
+
+async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: asyncio.AbstractEventLoop,
+                    system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
+                    session_id: Optional[str] = None, resume_messages: Optional[list] = None,
+                    resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
+                    resume_execution: Optional[list] = None, provider: Optional[Any] = None,
+                    ctx: Optional["_RunContext"] = None) -> None:
     """Main agent loop (async version for MCP support).
 
     Args:
@@ -267,13 +314,22 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                 objective=state.objective,
                 summary=state.summary,
                 execution=journal.to_dicts(),
+                runs=ctx.prior_runs + [ctx.recorder.snapshot().to_dict()],
+                evidence=ctx.prior_evidence + [e.to_dict() for e in ctx.recorder.evidence],
+                legacy_history=ctx.legacy_history,
             )
             return True
         except OSError as e:
             print(f"⚠️  Could not save session {session_id}: {e}. Durability is unknown; execution will stop without retrying.")
             return False
+        except session.SessionValidationError as e:
+            print(f"⚠️  Session {session_id} was not saved: the state is invalid ({e}). The previous saved state is kept.")
+            return False
 
+    ctx.persist = _persist
     if not _persist():
+        ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION,
+                         "the session could not be saved before the run started; durability is unknown")
         return
 
     # Merge local and MCP tools
@@ -292,6 +348,7 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
 
     for iteration in range(1, config.MAX_ITERATIONS + 1):
         render.print_iteration_header(iteration, config.MAX_ITERATIONS)
+        ctx.recorder.begin_iteration(iteration)
 
         # --- CONTEXT COMPACTION ---
         current_tokens = sum(get_token_count(msg.get('content', '') or json.dumps(msg)) for msg in messages)
@@ -304,8 +361,10 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                     render.print_llm_error(f"Context summary failed ({state.last_failure}); using bounded truncation.")
                     state.last_failure = None
                 if not _persist():
+                    ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, "the session could not be saved after compaction; durability is unknown")
                     return
             except compaction.CannotCompactError as e:
+                ctx.recorder.end(runs.RunStatus.LIMIT_REACHED, f"the context budget cannot hold the required history: {e}")
                 print(f"\n❌ {e} Stopping: the run cannot continue within the context budget.")
                 break
             after_tokens = sum(get_token_count(msg.get('content', '') or json.dumps(msg)) for msg in messages)
@@ -327,14 +386,17 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                 break
 
         if turn.outcome == provider_mod.TurnOutcome.TIMEOUT:
+            ctx.recorder.end(runs.RunStatus.PROVIDER_FAILED, f"the model request timed out after {attempt + 1} attempts")
             render.print_llm_error(f"LM Studio timeout after {attempt + 1} attempts: {turn.error.message}")
             break
         if turn.outcome == provider_mod.TurnOutcome.LENGTH:
+            ctx.recorder.end(runs.RunStatus.LIMIT_REACHED, "the model response was cut off by the length limit")
             render.print_llm_error(
                 "Model response was cut off by the length limit (finish_reason=length). The turn was discarded "
                 "and no tool was run. The run stops without claiming completion.")
             break
         if not turn.succeeded:
+            ctx.recorder.end(runs.RunStatus.PROVIDER_FAILED, f"model turn {turn.outcome.value}: {turn.error.message if turn.error else 'no detail'}")
             render.print_llm_error(_turn_failure_message(turn))
             break
 
@@ -354,6 +416,7 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
 
         # Get the assistant's response
         if not result.get("choices") or not result["choices"]:
+            ctx.recorder.end(runs.RunStatus.PROVIDER_FAILED, "the model returned an empty response")
             render.print_empty_response()
             break
 
@@ -371,6 +434,7 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
         if message.get("tool_calls"):
             valid_calls, call_error = _validate_tool_call_batch(message["tool_calls"], journal)
             if not valid_calls:
+                ctx.recorder.end(runs.RunStatus.PROVIDER_FAILED, f"invalid tool-call batch: {call_error}")
                 render.print_llm_error(call_error)
                 break
 
@@ -393,10 +457,13 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                     function.get("arguments", "{}"),
                 )
         if not _persist():
+            ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, "the session could not be saved after the model turn; durability is unknown")
             return
 
         # 2. Check for completion
         if finish_reason == "stop":
+            ctx.recorder.end(runs.RunStatus.COMPLETED_UNVERIFIED, "the model stopped; no verification was performed",
+                             final_message=message.get("content") or "")
             render.print_completion()
             break
 
@@ -432,13 +499,16 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                     observation_str = _serialize_observation(observation)
                     render.print_observation(observation_str)
                     journal.transition(tool_id, execution.ToolCallStatus.FAILED, observation_str, "validation")
+                    ctx.recorder.record_call(tool_id, tool_name or "unnamed", "failed")
                     messages.append({"role": "tool", "tool_call_id": tool_id, "content": observation_str})
                     if not _persist():
+                        ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, "the session could not be saved; durability is unknown")
                         return
                     continue
 
                 if tool_name and tool_input is not None:
                     observation_str = None  # Reset for this tool call iteration
+                    user_denied = False
                     render.print_tool_call(tool_name, tool_input)
 
                     try:
@@ -446,6 +516,7 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                     except execution.ExecutionStateError:
                         raise
                     if not _persist():
+                        ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, "the session could not be saved; durability is unknown")
                         return
 
                     observation = await _dispatch_safely(tool_name, tool_input, mcp_client, event_loop, tool_allowlist_override)
@@ -502,6 +573,7 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                         else:
                             render.print_permission_result("❌ Denied.")
                             observation = envelope.error_permission("Command/tool denied by user.")
+                            user_denied = True
 
                     # Convert envelope dict to JSON string for the model (if not already converted above)
                     if observation_str is None:
@@ -530,11 +602,26 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                             if category in ("unknown_outcome", "transient")
                             else execution.ToolCallStatus.FAILED
                         )
+                        ctx.recorder.record_call(tool_id, tool_name, terminal_status.value)
                         journal.transition(tool_id, terminal_status, observation_str, category)
                     else:
+                        ctx.recorder.record_call(tool_id, tool_name, "completed")
                         journal.transition(tool_id, execution.ToolCallStatus.COMPLETED, observation_str)
                     if not _persist():
+                        ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, "the session could not be saved; durability is unknown")
                         return
+
+                    if user_denied:
+                        # The user refused this action. The run stops rather than route around that decision.
+                        for skipped in tool_calls[tool_index + 1:]:
+                            blocked = _serialize_observation(envelope.error_permission(
+                                "Skipped: the user denied an earlier call in this turn; not executed."))
+                            messages.append({"role": "tool", "tool_call_id": skipped.get("id"), "content": blocked})
+                            journal.transition(skipped.get("id"), execution.ToolCallStatus.FAILED, blocked, "permission")
+                        ctx.recorder.end(runs.RunStatus.BLOCKED,
+                                         f"the user denied permission for tool {tool_name}; the run stopped")
+                        _persist()
+                        break
 
                     if is_repeat:
                         render.print_guardrail_stop()
@@ -551,21 +638,28 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                                 "guardrail",
                             )
                         if not _persist():
+                            ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, "the session could not be saved; durability is unknown")
                             return
                         break
 
+            if not ctx.recorder.open:
+                break
+
         elif finish_reason != "stop":
+            ctx.recorder.end(runs.RunStatus.PROVIDER_FAILED, f"unexpected finish reason {finish_reason!r}")
             render.print_finish_reason_warning(finish_reason)
             break
     else:
+        ctx.recorder.end(runs.RunStatus.LIMIT_REACHED, f"the iteration limit ({config.MAX_ITERATIONS}) was reached")
         render.print_max_iterations_reached()
 
 
 def agent_loop(user_goal: str, system_prompt_override: Optional[str] = None, tool_allowlist_override: Optional[list] = None,
                session_id: Optional[str] = None, resume_messages: Optional[list] = None,
                resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
-               resume_execution: Optional[list] = None) -> None:
-    """Synchronous entry point that sets up async context.
+               resume_execution: Optional[list] = None, resume_runs: Optional[list] = None,
+               resume_evidence: Optional[list] = None, legacy_history: bool = False) -> "runs.RunOutcome":
+    """Synchronous entry point that sets up async context. Returns the run's RunOutcome.
 
     Args:
         user_goal: The objective for the agent
@@ -598,12 +692,11 @@ def agent_loop(user_goal: str, system_prompt_override: Optional[str] = None, too
         event_loop.run_until_complete(mcp_client.connect_all(mcp_config))
 
         # Run the agent loop
-        event_loop.run_until_complete(agent_loop_async(user_goal, mcp_client, event_loop, system_prompt_override,
-                                                       tool_allowlist_override, session_id=session_id,
-                                                       resume_messages=resume_messages,
-                                                       resume_objective=resume_objective,
-                                                       resume_summary=resume_summary,
-                                                       resume_execution=resume_execution))
+        return event_loop.run_until_complete(agent_loop_async(
+            user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override,
+            session_id=session_id, resume_messages=resume_messages, resume_objective=resume_objective,
+            resume_summary=resume_summary, resume_execution=resume_execution, resume_runs=resume_runs,
+            resume_evidence=resume_evidence, legacy_history=legacy_history))
 
     finally:
         # Close MCP connections

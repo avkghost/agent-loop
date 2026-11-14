@@ -567,6 +567,27 @@ After compaction:  6 messages (24,576 tokens) + summary
 → Loop continues for 20+ more iterations
 ```
 
+### Run Outcomes and Evidence
+
+Every goal ends with a `RunOutcome`, and the CLI prints it as `🧾 Run <id>: <status> — <reason>`. The outcome is also returned to programmatic callers. Statuses mean exactly what the runtime can establish:
+
+| Status | When |
+|---|---|
+| `completed_unverified` | The model stopped normally. Nothing was verified. |
+| `needs_attention` | Durable state could not be saved, so a person must check. |
+| `blocked` | The user refused a requested action. The run stops rather than route around that decision. |
+| `unknown` | An external operation's outcome is unknown, or the run hit an unexpected error. A later model stop does not clear an unknown external effect. |
+| `interrupted` | Cancelled or interrupted, or a run whose process ended before it recorded an outcome. |
+| `provider_failed` | The model request timed out, failed, was incomplete or malformed, returned nothing, or sent an unexpected finish reason. |
+| `limit_reached` | The iteration budget, the context budget, or the response length limit was reached. |
+| `completed_verified` | Reserved for a future verification gate. The runtime never emits it. |
+
+Recoverable tool errors do not end a run. The model sees the error and can continue.
+
+**Evidence** records are runtime observations taken from the execution journal. Each names the journal call it came from, and each carries a short summary, never the tool's output. A completed call is a success observation, and an unknown call is an unknown observation, never a success. A model's own statements are not evidence, so a run is never verified because its output says so.
+
+**Session format 5** stores runs and evidence next to the conversation and the journal. Format 4 sessions still load, and their earlier history is recorded as unrecorded (`legacy_history`). Nothing is reconstructed for them. A run that was still open when the process ended is recovered as `interrupted`, and it is never re-executed.
+
 ### Managed Background Jobs
 
 For a long-running local process (a server, a watcher), the agent starts a **managed job** instead of a foreground command:

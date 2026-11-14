@@ -55,6 +55,20 @@ def _round(messages, round_index):
     return messages
 
 
+def _journal_for(messages):
+    """The durable records a runtime would hold for a history: one per declared call, completed when answered."""
+    answers = {m.get("tool_call_id"): m.get("content") for m in messages if m.get("role") == "tool"}
+    records = []
+    for message in messages:
+        for call in message.get("tool_calls", []) or []:
+            call_id = call["id"]
+            answered = call_id in answers
+            records.append({"tool_call_id": call_id, "tool_name": call["function"]["name"], "arguments": {},
+                            "status": "completed" if answered else "running",
+                            "outcome": answers.get(call_id), "error_category": None})
+    return records
+
+
 def _compact_rounds(monkeypatch, rounds, stub=None, goal=OBJECTIVE):
     stub = stub or SummarizerStub()
     monkeypatch.setattr(scripted_provider, "POST", stub)
@@ -196,7 +210,8 @@ def test_legacy_session_without_merged_summaries_still_resumes(tmp_sessions, mon
 
 def test_multi_compaction_session_round_trip_resumes_with_one_summary(tmp_sessions, monkeypatch):
     history, stub = _compact_rounds(monkeypatch, rounds=3)
-    session.save_session("multi", "goal", history[-1], objective=stub.state.objective, summary=stub.state.summary)
+    session.save_session("multi", "goal", history[-1], objective=stub.state.objective, summary=stub.state.summary,
+                         execution=_journal_for(history[-1]))
     reloaded = session.load_session("multi")["messages"]
 
     assert reloaded == history[-1]

@@ -59,7 +59,7 @@ def _call(call_id, name="list_directory", path="."):
 
 
 def _drive(monkeypatch, responses, dispatch_fn, *, summarizer=None, session_id=None,
-           resume_messages=None, **config_overrides):
+           resume_messages=None, resume_execution=None, **config_overrides):
     """Run agent_loop_async with scripted model replies. Summary calls are routed separately."""
     loop_posts, summary_posts = [], []
 
@@ -86,7 +86,7 @@ def _drive(monkeypatch, responses, dispatch_fn, *, summarizer=None, session_id=N
     try:
         event_loop.run_until_complete(loop.agent_loop_async(
             "hardening goal", SimpleNamespace(get_openai_tools=lambda: []), event_loop,
-            session_id=session_id, resume_messages=resume_messages))
+            session_id=session_id, resume_messages=resume_messages, resume_execution=resume_execution))
     finally:
         event_loop.close()
     return SimpleNamespace(requests=loop_posts, summaries=summary_posts)
@@ -113,8 +113,9 @@ def test_agent_prompt_advertises_managed_jobs_and_no_shell_job_control():
 # B1 (M5). Atomic session writes, observed through the filesystem
 # ---------------------------------------------------------------------------
 
-PREVIOUS = [{"role": "user", "content": "previous state"}]
-NEXT = [{"role": "user", "content": "new state"}]
+SYS = {"role": "system", "content": "sys"}
+PREVIOUS = [SYS, {"role": "user", "content": "previous state"}]
+NEXT = [SYS, {"role": "user", "content": "new state"}]
 
 
 def test_interrupted_overwrite_keeps_the_previous_session_readable(tmp_sessions, monkeypatch):
@@ -186,7 +187,8 @@ def test_completed_result_survives_interruption_of_the_next_request_and_is_not_r
 
     # Resume: the completed call must not be dispatched again
     resumed = _drive(monkeypatch, [make_streamed_response(finish_reason="stop", content="done")],
-                     dispatch_fn, session_id="sid-m9", resume_messages=saved)
+                     dispatch_fn, session_id="sid-m9", resume_messages=saved,
+                     resume_execution=session.load_session("sid-m9")["execution"])
     assert dispatched == ["list_directory"], "resume re-dispatched a completed call"
     assert not protocol_violations(resumed.requests[0]["messages"])
 
@@ -260,7 +262,8 @@ def test_interrupted_call_resumes_as_interrupted_without_redispatch(monkeypatch,
     saved = session.load_session("sid-resume-c")["messages"]
 
     run = _drive(monkeypatch, [make_streamed_response(finish_reason="stop", content="ok")],
-                 dispatch_fn, session_id="sid-resume-c", resume_messages=saved)
+                 dispatch_fn, session_id="sid-resume-c", resume_messages=saved,
+                 resume_execution=session.load_session("sid-resume-c")["execution"])
 
     assert dispatched == ["write_file"], "interrupted call must not run again on resume"
     results = _tool_messages(run.requests[0]["messages"])

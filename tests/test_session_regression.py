@@ -20,7 +20,9 @@ def test_session_round_trip_preserves_message_fields(tmp_sessions):
         {"role": "tool", "tool_call_id": "call_1", "content": "done"},
     ]
 
-    session.save_session("sid", "goal", messages)
+    session.save_session("sid", "goal", messages, execution=[
+        {"tool_call_id": "call_1", "tool_name": "x", "arguments": {}, "status": "completed",
+         "outcome": "done", "error_category": None}])
     loaded = session.load_session("sid")
 
     assert loaded["session_id"] == "sid"
@@ -40,8 +42,8 @@ def test_malformed_session_returns_none(tmp_sessions):
 
 
 def test_interrupted_write_preserves_existing_session(tmp_sessions, monkeypatch):
-    original = [{"role": "user", "content": "original"}]
-    replacement = [{"role": "user", "content": "replacement"}]
+    original = [{"role": "system", "content": "sys"}, {"role": "user", "content": "original"}]
+    replacement = [{"role": "system", "content": "sys"}, {"role": "user", "content": "replacement"}]
     session.save_session("sid", "old goal", original)
 
     original_replace = session.os.replace
@@ -157,6 +159,8 @@ def test_resume_answers_unresolved_tool_call_without_redispatch(
         dispatch_fn=unexpected_dispatch,
         session_id="sid",
         resume_messages=resume_messages,
+        resume_execution=[{"tool_call_id": "call_1", "tool_name": "x", "arguments": {}, "status": "running",
+                           "outcome": None, "error_category": None}],
     )
 
     assert dispatched == []
@@ -179,7 +183,8 @@ def test_cli_resume_reconstructs_and_continues_session(monkeypatch, capsys):
     cli.main(["resume", "sid"])
 
     assert resumed == [
-        (("goal",), {"session_id": "sid", "resume_messages": []})
+        (("goal",), {"session_id": "sid", "resume_messages": [], "resume_runs": [],
+                     "resume_evidence": [], "legacy_history": True})
     ]
     assert "Resuming session: goal" in capsys.readouterr().out
 

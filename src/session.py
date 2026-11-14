@@ -8,11 +8,15 @@ from typing import Dict, Any, List, Optional
 
 from .compaction import SUMMARY_MARKER, RECENT_USER_MARKER
 from .execution import ExecutionJournal, ExecutionStateError, ToolCallStatus, INTERRUPTED_RESULT, SKIPPED_RESULT
+from . import runs as run_records
 
 
 SESSIONS_DIR = Path.home() / ".agent_loop" / "sessions"
 # Format 4 persists objective, replaceable summary, and durable execution records independently.
-SESSION_FORMAT = 4
+# Format 5 adds run outcomes and evidence records. Format 4 sessions still load; their run history is
+# explicitly unrecorded (legacy_history), never reconstructed.
+SESSION_FORMAT = 5
+RUN_HISTORY_FIELDS = ("runs", "evidence", "legacy_history")
 
 
 class SessionValidationError(ValueError):
@@ -40,7 +44,11 @@ def validate_session_data(data: Dict[str, Any]) -> str:
     ):
         raise SessionValidationError("session messages must be a list of role-bearing objects")
 
-    if stored_format == SESSION_FORMAT:
+    if stored_format == 5:
+        _validate_format_five(data, messages)
+        return "structured"
+
+    if stored_format == 4:
         required = ("session_id", "goal", "objective", "summary", "messages", "execution", "saved_at")
         missing = [field for field in required if field not in data]
         if missing:
@@ -94,6 +102,62 @@ def validate_session_data(data: Dict[str, Any]) -> str:
     return "legacy"
 
 
+def _validate_format_five(data: Dict[str, Any], messages: List[Any]) -> None:
+    """Format 4 rules apply to the conversation and journal; run history is validated against them."""
+    required = ("session_id", "goal", "objective", "summary", "messages", "execution", "saved_at",
+                *RUN_HISTORY_FIELDS)
+    missing = [field for field in required if field not in data]
+    if missing:
+        raise SessionValidationError(f"format 5 is missing required field(s): {', '.join(missing)}")
+    if not isinstance(data.get("session_id"), str) or not isinstance(data.get("goal"), str):
+        raise SessionValidationError("format 5 requires string session_id and goal")
+    if not isinstance(data.get("saved_at"), str) or not isinstance(data.get("objective"), str):
+        raise SessionValidationError("format 5 requires string saved_at and objective")
+    if not messages or messages[0].get("role") != "system":
+        raise SessionValidationError("format 5 messages must begin with a system message")
+    if data.get("summary") is not None and not isinstance(data.get("summary"), str):
+        raise SessionValidationError("format 5 summary must be a string or null")
+    if not isinstance(data.get("legacy_history"), bool):
+        raise SessionValidationError("format 5 legacy_history must be a boolean")
+    try:
+        journal = ExecutionJournal.from_dicts(data.get("execution"))
+    except ExecutionStateError as exc:
+        raise SessionValidationError(f"invalid execution state: {exc}") from exc
+    _validate_execution_messages(data)
+    try:
+        run_records.validate_run_history(data.get("runs"), data.get("evidence"))
+    except run_records.RunRecordError as exc:
+        raise SessionValidationError(f"invalid run history: {exc}") from exc
+    _validate_evidence_references(data, journal)
+
+
+def _validate_evidence_references(data: Dict[str, Any], journal: ExecutionJournal) -> None:
+    """A runtime observation must match the journal record it cites: same run's call, and the same status."""
+    expected = {"succeeded": "completed", "failed": "failed", "unknown": "unknown"}
+    for raw in data["evidence"]:
+        record = run_records.EvidenceRecord.from_dict(raw)
+        if record.provenance != run_records.Provenance.RUNTIME_OBSERVATION.value:
+            continue
+        call = journal.get(record.journal_call_id)
+        if call is None:
+            raise SessionValidationError(
+                f"evidence {record.evidence_id} cites a journal record that does not exist")
+        if call.status.value != expected[record.outcome]:
+            raise SessionValidationError(
+                f"evidence {record.evidence_id} claims {record.outcome} but its journal record is {call.status.value}")
+
+
+def resume_history(data: Dict[str, Any]) -> tuple:
+    """(runs, evidence, legacy_history) for a session being resumed.
+
+    Format 5 history is returned with interrupted runs recovered. Older sessions have no recorded history,
+    so they return an empty history and legacy_history=True. Nothing is reconstructed for them.
+    """
+    if data.get("format") == 5:
+        return run_records.recover_interrupted(data["runs"]), list(data["evidence"]), bool(data["legacy_history"])
+    return [], [], True
+
+
 def _ensure_dir():
     """Ensure sessions directory exists."""
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
@@ -122,83 +186,99 @@ def _is_error_result(content: Any) -> bool:
 def _validate_execution_messages(data: Dict[str, Any]) -> None:
     """Validate retained tool groups against the authoritative execution journal."""
     journal = ExecutionJournal.from_dicts(data.get("execution"))
+    label = f"session format {data.get('format')}"
     declared = {}
     results = {}
     for message in data.get("messages", []):
         if message.get("role") == "assistant" and "tool_calls" in message:
             calls = message.get("tool_calls")
             if not isinstance(calls, list):
-                raise SessionValidationError("format 4 assistant tool_calls must be a list")
+                raise SessionValidationError(f"{label} assistant tool_calls must be a list")
             for call in calls:
                 if not isinstance(call, dict):
-                    raise SessionValidationError("format 4 assistant tool_call must be an object")
+                    raise SessionValidationError(f"{label} assistant tool_call must be an object")
                 call_id = call.get("id")
                 if not isinstance(call_id, str) or not call_id or call_id in declared:
-                    raise SessionValidationError("format 4 contains duplicate or invalid assistant tool_call_id")
+                    raise SessionValidationError(f"{label} contains duplicate or invalid assistant tool_call_id")
                 if "type" in call and call.get("type") != "function":
-                    raise SessionValidationError(f"format 4 tool_call {call_id} has invalid type")
+                    raise SessionValidationError(f"{label} tool_call {call_id} has invalid type")
                 function = call.get("function")
                 if not isinstance(function, dict):
-                    raise SessionValidationError(f"format 4 tool_call {call_id} requires a function object")
+                    raise SessionValidationError(f"{label} tool_call {call_id} requires a function object")
                 if not isinstance(function.get("name"), str) or not function.get("name"):
-                    raise SessionValidationError(f"format 4 tool_call {call_id} requires a function name")
+                    raise SessionValidationError(f"{label} tool_call {call_id} requires a function name")
                 if not isinstance(function.get("arguments"), str):
-                    raise SessionValidationError(f"format 4 tool_call {call_id} requires string function arguments")
+                    raise SessionValidationError(f"{label} tool_call {call_id} requires string function arguments")
                 declared[call_id] = call
         elif message.get("role") == "tool":
             call_id = message.get("tool_call_id")
             if call_id in results:
-                raise SessionValidationError(f"format 4 contains duplicate tool result for {call_id}")
+                raise SessionValidationError(f"{label} contains duplicate tool result for {call_id}")
             results[call_id] = message.get("content")
 
     for call_id, content in results.items():
         record = journal.get(call_id)
         if record is None:
-            raise SessionValidationError(f"format 4 tool result has no execution record: {call_id}")
+            raise SessionValidationError(f"{label} tool result has no execution record: {call_id}")
         if call_id not in declared:
-            raise SessionValidationError(f"format 4 tool result has no retained assistant declaration: {call_id}")
+            raise SessionValidationError(f"{label} tool result has no retained assistant declaration: {call_id}")
         if record.status in (ToolCallStatus.PENDING, ToolCallStatus.RUNNING):
             raise SessionValidationError(
-                f"format 4 active call {call_id} ({record.status.value}) already has a tool result"
+                f"{label} active call {call_id} ({record.status.value}) already has a tool result"
             )
         if record.outcome is not None and content != record.outcome:
-            raise SessionValidationError(f"format 4 tool result conflicts with execution record: {call_id}")
+            raise SessionValidationError(f"{label} tool result conflicts with execution record: {call_id}")
         if record.status == ToolCallStatus.COMPLETED and _is_error_envelope(content):
-            raise SessionValidationError(f"format 4 completed call {call_id} has an error result")
+            raise SessionValidationError(f"{label} completed call {call_id} has an error result")
         if record.status in (ToolCallStatus.UNKNOWN, ToolCallStatus.FAILED) and not _is_error_result(content):
             raise SessionValidationError(
-                f"format 4 {record.status.value} call {call_id} has a success-looking result"
+                f"{label} {record.status.value} call {call_id} has a success-looking result"
             )
 
     for call_id in declared:
         if journal.get(call_id) is None:
-            raise SessionValidationError(f"format 4 assistant declaration has no execution record: {call_id}")
+            raise SessionValidationError(f"{label} assistant declaration has no execution record: {call_id}")
+
+
+def build_candidate(session_id: str, goal: str, messages: List[Dict[str, Any]],
+                    objective: Optional[str] = None, summary: Optional[str] = None,
+                    execution: Optional[List[Dict[str, Any]]] = None,
+                    runs: Optional[List[Dict[str, Any]]] = None,
+                    evidence: Optional[List[Dict[str, Any]]] = None,
+                    legacy_history: bool = False) -> Dict[str, Any]:
+    """The complete format-5 session document that would be written."""
+    # ``goal`` remains display/CLI metadata for compatibility; ``objective`` is authoritative.
+    return {
+        "format": SESSION_FORMAT,
+        "session_id": session_id,
+        "goal": goal,
+        "objective": objective if objective is not None else f"Objective: {goal}",
+        "summary": summary,
+        "messages": messages,
+        "execution": execution if execution is not None else [],
+        "runs": runs if runs is not None else [],
+        "evidence": evidence if evidence is not None else [],
+        "legacy_history": bool(legacy_history),
+        "saved_at": datetime.now().isoformat(),
+    }
 
 
 def save_session(session_id: str, goal: str, messages: List[Dict[str, Any]],
                  objective: Optional[str] = None, summary: Optional[str] = None,
-                 execution: Optional[List[Dict[str, Any]]] = None) -> None:
-    """Save session state to disk."""
+                 execution: Optional[List[Dict[str, Any]]] = None,
+                 runs: Optional[List[Dict[str, Any]]] = None,
+                 evidence: Optional[List[Dict[str, Any]]] = None,
+                 legacy_history: bool = False) -> None:
+    """Save session state to disk (format 5).
+
+    The candidate is validated with the loader's own rules before anything touches the disk. An invalid
+    candidate raises SessionValidationError and leaves the previously saved file exactly as it was.
+    """
     _ensure_dir()
-
-    # ``goal`` remains display/CLI metadata for compatibility; ``objective`` is authoritative.
-    stored_objective = objective if objective is not None else f"Objective: {goal}"
-    stored_execution = execution if execution is not None else []
-    try:
-        ExecutionJournal.from_dicts(stored_execution)
-    except ExecutionStateError as exc:
-        raise SessionValidationError(f"invalid execution state: {exc}") from exc
-
-    session_data = {
-        "format": SESSION_FORMAT,
-        "session_id": session_id,
-        "goal": goal,
-        "objective": stored_objective,
-        "summary": summary,
-        "messages": messages,
-        "execution": stored_execution,
-        "saved_at": datetime.now().isoformat(),
-    }
+    candidate = build_candidate(session_id, goal, messages, objective=objective, summary=summary,
+                                execution=execution, runs=runs, evidence=evidence,
+                                legacy_history=legacy_history)
+    validate_session_data(candidate)
 
     session_path = SESSIONS_DIR / f"{session_id}.json"
     # Write to a temp file in the same directory, then atomically replace the target.
@@ -206,7 +286,7 @@ def save_session(session_id: str, goal: str, messages: List[Dict[str, Any]],
     tmp_path = session_path.with_name(session_path.name + ".tmp")
     try:
         with open(tmp_path, "w") as f:
-            json.dump(session_data, f, indent=2)
+            json.dump(candidate, f, indent=2)
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, session_path)

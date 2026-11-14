@@ -8,7 +8,7 @@ from pathlib import Path
 
 from . import config, loop, jobs
 from .config_loader import load_config, apply_config_overrides
-from .session import SESSION_FORMAT, SessionLoadError, SessionValidationError, list_sessions, load_session, validate_session_data
+from .session import SESSION_FORMAT, SessionLoadError, SessionValidationError, list_sessions, load_session, validate_session_data, resume_history
 from .execution import ExecutionJournal
 from .tools.mcp_client import MCPClientManager
 from .agents_loader import load_agents, get_agent_description
@@ -85,6 +85,13 @@ def parse_args(args=None):
     return parser.parse_args(args)
 
 
+def _report(outcome) -> None:
+    """Human-readable final status of one goal. The RunOutcome itself is returned to callers."""
+    if outcome is None:
+        return
+    print(f"\n🧾 Run {outcome.run_id}: {outcome.status} — {outcome.reason}")
+
+
 def main(args=None):
     """Main CLI entry point. Managed jobs still running when the runtime exits are terminated."""
     try:
@@ -122,7 +129,7 @@ def _main(args=None):
             return
         goal = parsed.goal
         session_id = str(uuid.uuid4())
-        loop.agent_loop(goal, session_id=session_id)
+        _report(loop.agent_loop(goal, session_id=session_id))
 
     elif command == "repl":
         # Interactive REPL with persistent MCP connections
@@ -155,7 +162,7 @@ def _main(args=None):
                         continue
 
                     session_id = str(uuid.uuid4())
-                    loop.agent_loop(goal, session_id=session_id)
+                    _report(loop.agent_loop(goal, session_id=session_id))
                 except KeyboardInterrupt:
                     print("\n\nExiting...")
                     break
@@ -180,7 +187,9 @@ def _main(args=None):
             print(f"❌ Cannot resume session: {e}")
             return
 
-        resume_kwargs = {}
+        prior_runs, prior_evidence, legacy_history = resume_history(session_data)
+        resume_kwargs = {"resume_runs": prior_runs, "resume_evidence": prior_evidence,
+                         "legacy_history": legacy_history}
         if session_kind in ("structured", "structured_legacy"):
             objective = session_data.get("objective")
             summary = session_data.get("summary")
@@ -199,12 +208,12 @@ def _main(args=None):
                 resume_kwargs = {"resume_objective": legacy_objective}
 
         print(f"📂 Resuming session: {session_data.get('goal', 'Unknown goal')}")
-        loop.agent_loop(
+        _report(loop.agent_loop(
             session_data.get("goal", ""),
             session_id=parsed.session_id,
             resume_messages=messages,
             **resume_kwargs,
-        )
+        ))
 
     elif command == "sessions":
         sessions = list_sessions()
@@ -290,11 +299,11 @@ def _main(args=None):
             apply_config_overrides(config_data)
 
         # Run the agent with overrides
-        loop.agent_loop(
+        _report(loop.agent_loop(
             parsed.goal,
             system_prompt_override=agent.system_prompt,
             tool_allowlist_override=agent.tools
-        )
+        ))
 
     elif command == "skills":
         skills = load_skills()
@@ -328,11 +337,11 @@ def _main(args=None):
             apply_config_overrides(config_data)
 
         # Run the skill with overrides
-        loop.agent_loop(
+        _report(loop.agent_loop(
             parsed.goal,
             system_prompt_override=skill.system_prompt,
             tool_allowlist_override=skill.allowed_tools
-        )
+        ))
 
 
 if __name__ == "__main__":

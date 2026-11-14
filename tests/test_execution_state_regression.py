@@ -48,7 +48,7 @@ def test_session_format_four_round_trip_preserves_execution(tmp_sessions):
         objective="Objective: goal", execution=[record.to_dict()],
     )
     loaded = session.load_session("sid")
-    assert loaded["format"] == session.SESSION_FORMAT == 4
+    assert loaded["format"] == session.SESSION_FORMAT == 5
     assert execution.ExecutionJournal.from_dicts(loaded["execution"]).get("call_1").status is execution.ToolCallStatus.UNKNOWN
 
 
