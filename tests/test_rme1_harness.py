@@ -90,7 +90,7 @@ def test_protected_files_are_detected_when_changed(tmp_path):
     ("needs_attention", None, "session could not be saved", harness.RUNTIME_FAILURE),
     ("provider_failed", None, "", harness.PROVIDER_FAILURE),
     ("interrupted", None, "", harness.INTERRUPTED),
-    ("limit_reached", None, "", harness.TASK_FAILURE),
+    ("limit_reached", None, "", harness.LIMIT_REACHED),
 ])
 def test_evaluator_separates_verified_from_false_positive_and_maps_every_status(status, evaluator, reason, expected):
     assert harness.classify(status, reason, evaluator) == expected
@@ -109,9 +109,29 @@ def test_default_trial_is_not_executed(tmp_path):
     assert "final_run_status" not in record
 
 
+def _scripted_trial(tmp_path, monkeypatch, responses, label):
+    """Runs one harness trial against an exact, ordered script. Every model request is counted; a request beyond
+    the script is recorded and reported as an explicit failure instead of surfacing as a transport error."""
+    monkeypatch.setattr(session, "SESSIONS_DIR", tmp_path / "unused-home")
+    # Trial commands never write bytecode, so no stale cache can decide a verification result.
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    script = list(responses)
+    seen = {"requests": 0, "exhausted": False}
+
+    def post(*args, **kwargs):
+        seen["requests"] += 1
+        if not script:
+            seen["exhausted"] = True
+            raise AssertionError("scripted responses exhausted: the runtime requested an unexpected model turn")
+        return script.pop(0)
+
+    monkeypatch.setattr(scripted_provider, "POST", post)
+    record = harness.run_trial("RME-02", tmp_path, label, tmp_path / "eval", execute=True, endpoint_ok=True)
+    return record, seen, script
+
+
 def test_harness_execution_path_with_scripted_provider_reaches_a_verified_outcome(tmp_path, monkeypatch):
     """Validates the harness path only. The scripted model is not real-model evidence."""
-    monkeypatch.setattr(session, "SESSIONS_DIR", tmp_path / "unused-home")
     scripted = [
         _turn("run_command", {"command": "python3 -m unittest -q tests.test_stats"}, "c1"),
         _turn("write_file", {"path": "calc/stats.py",
@@ -119,14 +139,29 @@ def test_harness_execution_path_with_scripted_provider_reaches_a_verified_outcom
                                         "    return sum(values) / len(values)\n"}, "c2"),
         _stop("repaired"),
     ]
-    monkeypatch.setattr(scripted_provider, "POST", lambda *a, **k: scripted.pop(0))
-    record = harness.run_trial("RME-02", tmp_path, "scripted-path", tmp_path / "eval", execute=True, endpoint_ok=True)
+    record, seen, remaining = _scripted_trial(tmp_path, monkeypatch, scripted, "scripted-path")
+    assert seen["exhausted"] is False and seen["requests"] == 3, seen
+    assert remaining == []
     assert record["final_run_status"] == "completed_verified"
     assert record["classification"] == harness.VERIFIED_SUCCESS
     assert record["protected_files_unchanged"] is True
     assert record["independent_evaluator"]["passed"] is True
     assert record["tool_counts"].get("run_command") == 1 and record["tool_counts"].get("write_file") == 1
     assert record["verification_attempts"] == 1
+
+
+def test_incorrect_repair_in_the_same_scripted_path_never_reaches_a_verified_outcome(tmp_path, monkeypatch):
+    """Negative control: the same script with the original defect (+1 in the denominator) must not verify."""
+    scripted = [
+        _turn("run_command", {"command": "python3 -m unittest -q tests.test_stats"}, "c1"),
+        _turn("write_file", {"path": "calc/stats.py",
+                             "content": "def mean(values):\n    if not values:\n        raise ValueError('empty')\n"
+                                        "    return sum(values) / (len(values) + 1)\n"}, "c2"),
+        _stop("repaired"),
+    ]
+    record, seen, _ = _scripted_trial(tmp_path, monkeypatch, scripted, "scripted-wrong")
+    assert record["final_run_status"] != "completed_verified"
+    assert record["classification"] != harness.VERIFIED_SUCCESS
 
 
 def test_result_records_are_valid_bounded_json(tmp_path):

@@ -8,6 +8,7 @@ import asyncio
 import gc
 import os
 import shutil
+import subprocess
 import signal
 import sys
 import time
@@ -51,11 +52,15 @@ def lifecycle_env(tmp_path, monkeypatch):
     for name, body in HELPERS.items():
         (tmp_path / name).write_text(body)
     yield tmp_path
-    for proc in list(shell._UNREAPED):  # teardown: no retained leader survives a failed test
+    for proc in list(shell._UNREAPED):  # teardown: no retained group survives a failed test
+        try:
+            os.killpg(proc.pid, signal.SIGKILL)  # the whole group, not only the leader
+        except OSError:
+            pass
         try:
             proc.kill()
-            proc.wait()
-        except OSError:
+            proc.wait(timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
             pass
     shell._UNREAPED.clear()
     for pid_file in tmp_path.glob("*"):

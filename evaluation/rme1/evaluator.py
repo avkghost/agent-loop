@@ -1,5 +1,7 @@
 """Hidden evaluator checks and the independent evaluator. HOST ONLY: never copied into the agent image."""
 
+import hashlib
+import os
 import subprocess
 import sys
 from pathlib import Path
@@ -59,10 +61,23 @@ def run_hidden_check(scenario: Scenario, workspace: Path, evaluator_dir: Path) -
     """Run the hidden check from the harness. Bounded in time and output."""
     script = write_hidden_check(scenario, evaluator_dir)
     try:
-        proc = subprocess.run([sys.executable, str(script)], cwd=str(workspace), capture_output=True,
-                              text=True, timeout=SHELL_TIMEOUT_SECONDS)
+        # -B and PYTHONDONTWRITEBYTECODE keep the evaluator from writing bytecode into the evaluated tree
+        env = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
+        proc = subprocess.run([sys.executable, "-B", str(script)], cwd=str(workspace), capture_output=True,
+                              text=True, timeout=SHELL_TIMEOUT_SECONDS, env=env)
         passed = proc.returncode == 0 and "HIDDEN_PASS" in proc.stdout
         detail = (proc.stderr or proc.stdout)[-400:]
     except subprocess.TimeoutExpired:
         passed, detail = False, "hidden check timed out"
     return {"passed": passed, "detail": detail}
+
+
+def tree_digest(root: Path) -> str:
+    """A digest over every file's relative path and bytes. Used to show the evaluator left the tree unchanged."""
+    digest = hashlib.sha256()
+    for path in sorted(p for p in Path(root).rglob("*") if p.is_file()):
+        digest.update(str(path.relative_to(root)).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()

@@ -45,6 +45,14 @@ PROVIDER_FAILURE = "PROVIDER_FAILURE"
 RUNTIME_FAILURE = "RUNTIME_FAILURE"
 INTERRUPTED = "INTERRUPTED"
 NOT_EXECUTED = "NOT_EXECUTED"
+EVALUATION_ENVIRONMENT_FAILURE = "EVALUATION_ENVIRONMENT_FAILURE"  # result frame missing or corrupt; never success
+INVALID_MODEL_MISMATCH = "INVALID_MODEL_MISMATCH"                  # requests did not use the intended model
+LIMIT_REACHED = "LIMIT_REACHED"                         # runtime: iteration limit, independent evaluator FAIL or absent
+LIMIT_REACHED_EVALUATOR_PASS = "LIMIT_REACHED_EVALUATOR_PASS"  # runtime: iteration limit; the work product passed the
+                                                               # hidden checks, but the run never completed or verified
+DEADLINE_INTERRUPTED = "DEADLINE_INTERRUPTED"           # supervisor deadline; the runner saved an INTERRUPTED RunOutcome
+SUPERVISOR_TIMEOUT_NO_OUTCOME = "SUPERVISOR_TIMEOUT_NO_OUTCOME"  # forced termination; no RunOutcome was published
+BLOCKED = "BLOCKED"  # the model requested an operation that policy denied; the runtime's own terminal status
 
 
 SCENARIOS: Dict[str, Scenario] = {
@@ -138,8 +146,11 @@ def classify(run_status: Optional[str], reason: str, evaluator_passed: Optional[
         return PROVIDER_FAILURE
     if run_status == "interrupted":
         return INTERRUPTED
+    if run_status == "blocked":
+        # Valid benchmark outcome. Never a success, never a retry trigger, and never recast as UNKNOWN.
+        return BLOCKED
     if run_status == "limit_reached":
-        return TASK_FAILURE
+        return LIMIT_REACHED_EVALUATOR_PASS if evaluator_passed is True else LIMIT_REACHED
     if run_status == "needs_attention":
         return TASK_FAILURE if "verification" in reason or "acceptance" in reason else RUNTIME_FAILURE
     return RUNTIME_FAILURE

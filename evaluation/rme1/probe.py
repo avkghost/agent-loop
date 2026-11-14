@@ -82,8 +82,9 @@ hidden = subprocess.run(["sh", "-c", "find / -xdev -name 'hidden_rme*' 2>/dev/nu
 RESULTS["fs_hidden_evaluator"] = "PRESENT_UNEXPECTED" if hidden else "ABSENT"
 
 # Inference readiness: a generous budget so visible output is produced; reasoning tokens are reported separately.
-payload = ('{"model": "zai-org/glm-4.7-flash", "messages": [{"role": "user", "content": "Reply with the single word OK."}],'
-           ' "max_tokens": 1024, "temperature": 0.0, "stream": false}')
+MODEL = os.environ.get("RME_MODEL", "zai-org/glm-4.7-flash")
+payload = ('{"model": "%s", "messages": [{"role": "user", "content": "Reply with the single word OK."}],'
+           ' "max_tokens": 1024, "temperature": 0.0, "stream": false}' % MODEL)
 try:
     host, port, path = LLM_IP, 1234, "/v1/chat/completions"
     conn = http.client.HTTPConnection(host, port, timeout=120)

@@ -28,3 +28,32 @@ A real trial is never started by the tests. To run one yourself:
 - The wall-clock budget (300 s) is recorded but not enforced. Enforcing it would need an external runner.
 - `MAX_TURNS` is enforced through `config.MAX_ITERATIONS`, which the loop reads at run time.
 - Verification-command timeouts come from the criterion (`timeout_seconds`), not a global limit.
+
+## RME-1.5 infrastructure: deadline drill, snapshots, single-model protocol
+
+**Deadline drill** (`drill.py`, host only, no LLM request). `python evaluation/rme1/drill.py [graceful|forced|both] --image <ref>`.
+- Graceful: the runner's request goes to a silent loopback server inside the container. At the deadline SIGTERM reaches
+  the runner through tini; the runtime cancels the in-flight request, records INTERRUPTED, saves, and the runner
+  publishes RESULT and SESSION frames. Expected classification: `DEADLINE_INTERRUPTED`.
+- Forced: a stand-in saves a valid format-5 session and ignores SIGTERM. The container is removed and the process
+  group is killed. Expected classification: `SUPERVISOR_TIMEOUT_NO_OUTCOME`, no RESULT frame, and no INTERRUPTED
+  (the snapshot's run list is empty).
+- Each drill writes `tmp/rme1/drill-<kind>-*/results/drill.json`, `container.log` and `session_snapshot.json`.
+  `kill_error` records a refused process-group kill (EPERM was observed on macOS); the direct child is then killed.
+
+**Snapshots.** The host reads the session with `docker exec cat` (not `docker cp`, which did not see the tmpfs-backed
+`/tmp/sessions`). Each copy is validated with `validate_session_data`; an invalid, partial or failed copy never replaces
+the last valid snapshot (atomic `os.replace`). A removed container is counted as `source_gone`, not as a rejection.
+`last_lag_seconds` is the age of the snapshot's `saved_at`, which is naive UTC from the UTC container, so it is
+interpreted as UTC on the host.
+
+**Single-model protocol for real-model trials** (no unloading is performed by the harness or by any step of RME-1.5):
+1. Run one model at a time. GLM (`zai-org/glm-4.7-flash`) first; only after its trials are finished and its
+   results are archived, unload GLM through LM Studio, then load Qwen (`qwen/qwen3.8-27b`). Never load both.
+2. Before each trial record: model identity from `/api/v0/models` (id, arch, quantization, state), the loaded
+   context length, `memory_pressure -Q` and `sysctl -n vm.swapusage`.
+3. Keep task, acceptance criteria, authorization policy, temperature and iteration budget (`MAX_TURNS`) unchanged.
+4. Results from this protocol are new single-model results. They are reported separately from the original
+   benchmark results and never merged into them.
+5. Token measurements come from existing response metadata only (`metrics.py`). Time to first token and reasoning
+   tokens are not available without a production change and are reported as unavailable.
