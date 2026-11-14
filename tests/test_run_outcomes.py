@@ -71,12 +71,13 @@ def test_model_stop_is_completed_unverified_never_verified(monkeypatch):
     assert outcome.iteration_count == 1 and outcome.finished_at is not None
 
 
-def test_no_runtime_path_can_emit_completed_verified():
+def test_completed_verified_requires_the_explicit_verification_gate():
     recorder = runs.RunRecorder(goal="g")
     with pytest.raises(runs.RunRecordError, match="reserved"):
         recorder.end(S.COMPLETED_VERIFIED, "forged")
-    with pytest.raises(runs.RunRecordError):
-        runs.RunOutcome.from_dict(dict(_outcome_dict(), status="completed_verified"))
+    recorder.end_verified("criteria passed")
+    assert recorder.finish().run_status is S.COMPLETED_VERIFIED
+    assert runs.RunOutcome.from_dict(dict(_outcome_dict(), status="completed_verified"))
 
 
 def test_provider_timeout_exhaustion_is_provider_failed(monkeypatch):

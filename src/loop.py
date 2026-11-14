@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import config, envelope, prompts, dispatch, render, compaction, session, execution, jobs, stream
+from . import acceptance, verification
 from . import provider as provider_mod
 from . import runs
 from .authorization import SessionAuthorization
@@ -205,7 +206,9 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
                             resume_evidence: Optional[list] = None, legacy_history: bool = False,
                             authorization: Optional[SessionAuthorization] = None, owner: Optional[str] = None,
                             keep_jobs: bool = False, session_goal: Optional[str] = None,
-                            continuation: bool = False) -> "runs.RunOutcome":
+                            continuation: bool = False, criteria: Optional[list] = None,
+                            verification_cycles: int = 2, resume_criteria: Optional[list] = None,
+                            resume_verification_results: Optional[list] = None) -> "runs.RunOutcome":
     """Run one agent goal and return its RunOutcome.
 
     One-shot callers (keep_jobs=False) own their jobs: they are terminated when this run ends. A session
@@ -224,7 +227,10 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
             resume_objective=resume_objective, resume_summary=resume_summary,
             resume_execution=resume_execution, provider=provider, resume_runs=resume_runs,
             resume_evidence=resume_evidence, legacy_history=legacy_history,
-            authorization=authorization, session_goal=session_goal, continuation=continuation)
+            authorization=authorization, session_goal=session_goal, continuation=continuation,
+            criteria=criteria, resume_criteria=resume_criteria,
+            resume_verification_results=resume_verification_results,
+            verification_cycles=verification_cycles)
     finally:
         try:
             await provider.aclose()
@@ -239,12 +245,21 @@ async def agent_loop_async(user_goal: str, mcp_client: MCPClientManager, event_l
 class _RunContext:
     """What the run body reports to its wrapper: the recorder, prior history, and the persistence hook."""
 
-    def __init__(self, goal: str, prior_runs: list, prior_evidence: list, legacy_history: bool):
+    def __init__(self, goal: str, prior_runs: list, prior_evidence: list, legacy_history: bool,
+                 prior_criteria: list = None, prior_verification_results: list = None):
         self.recorder = runs.RunRecorder(goal=goal)
         self.prior_runs = list(prior_runs)
         self.prior_evidence = list(prior_evidence)
         self.legacy_history = legacy_history
         self.persist = None  # set by the body once it can save the session
+        self.criteria = [item if isinstance(item, acceptance.AcceptanceCriterion)
+                         else acceptance.AcceptanceCriterion.from_dict(item)
+                         for item in (prior_criteria or [])]
+        self.verification_results = [item if isinstance(item, verification.VerificationResult)
+                                     else verification.VerificationResult.from_dict(item)
+                                     for item in (prior_verification_results or [])]
+        self.verification_attempts = 0
+        self.verification_persistence_failed = False
 
 
 async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_loop: asyncio.AbstractEventLoop,
@@ -254,14 +269,32 @@ async def _agent_loop_run(user_goal: str, mcp_client: MCPClientManager, event_lo
                           resume_execution: Optional[list] = None, provider: Optional[Any] = None,
                           resume_runs: Optional[list] = None, resume_evidence: Optional[list] = None,
                           legacy_history: bool = False, authorization: Optional[SessionAuthorization] = None,
-                          session_goal: Optional[str] = None, continuation: bool = False) -> "runs.RunOutcome":
+                          session_goal: Optional[str] = None, continuation: bool = False,
+                          criteria: Optional[list] = None, resume_criteria: Optional[list] = None,
+                          resume_verification_results: Optional[list] = None,
+                          verification_cycles: int = 2) -> "runs.RunOutcome":
     """Run one goal. Every exit path records a status; the final state is persisted before this returns."""
-    ctx = _RunContext(user_goal, resume_runs or [], resume_evidence or [], legacy_history)
+    ctx = _RunContext(user_goal, resume_runs or [], resume_evidence or [], legacy_history,
+                      resume_criteria, resume_verification_results)
+    if not (isinstance(verification_cycles, int) and not isinstance(verification_cycles, bool)
+            and 1 <= verification_cycles <= verification.MAX_VERIFICATION_CYCLES):
+        ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION,
+                         f"verification cycles must be an integer from 1 to {verification.MAX_VERIFICATION_CYCLES}")
+        return ctx.recorder.finish()
+    try:
+        supplied = [item if isinstance(item, acceptance.AcceptanceCriterion)
+                    else acceptance.AcceptanceCriterion.from_dict(item)
+                    for item in (criteria or [])]
+        ctx.criteria.extend(item.bind(ctx.recorder.run_id) for item in supplied)
+    except (ValueError, TypeError) as exc:
+        ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, f"invalid acceptance criteria: {exc}")
+        return ctx.recorder.finish()
     try:
         await _run_body(user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override,
                         session_id=session_id, resume_messages=resume_messages, resume_objective=resume_objective,
                         resume_summary=resume_summary, resume_execution=resume_execution, provider=provider,
-                        ctx=ctx, authorization=authorization, session_goal=session_goal, continuation=continuation)
+                        ctx=ctx, authorization=authorization, session_goal=session_goal, continuation=continuation,
+                        verification_cycles=verification_cycles)
     except asyncio.CancelledError:
         ctx.recorder.end(runs.RunStatus.INTERRUPTED, "the run was cancelled before it finished")
         raise
@@ -285,7 +318,8 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                     resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
                     resume_execution: Optional[list] = None, provider: Optional[Any] = None,
                     ctx: Optional["_RunContext"] = None, authorization: Optional[SessionAuthorization] = None,
-                    session_goal: Optional[str] = None, continuation: bool = False) -> None:
+                    session_goal: Optional[str] = None, continuation: bool = False,
+                    verification_cycles: int = 2) -> None:
     """Main agent loop (async version for MCP support).
 
     Args:
@@ -350,6 +384,11 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                 runs=ctx.prior_runs + [ctx.recorder.snapshot().to_dict()],
                 evidence=ctx.prior_evidence + [e.to_dict() for e in ctx.recorder.evidence],
                 legacy_history=ctx.legacy_history,
+                criteria=([c.to_dict() if isinstance(c, acceptance.AcceptanceCriterion) else c for c in ctx.criteria]
+                          if ctx.criteria else None),
+                verification_results=([r.to_dict() if isinstance(r, verification.VerificationResult) else r
+                                       for r in ctx.verification_results]
+                                      if ctx.criteria or ctx.verification_results else None),
             )
             return True
         except OSError as e:
@@ -364,6 +403,57 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
         ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION,
                          "the session could not be saved before the run started; durability is unknown")
         return
+
+    verifier = verification.VerificationEngine()
+    # Calls already recorded before this run started. Only this run's own unknown outcomes block verification.
+    prior_call_ids = {record.get("tool_call_id") for record in journal.to_dicts()}
+
+    async def _verification_command(command: str, timeout_seconds: Optional[int] = None):
+        """Run a configured check through the normal authorization boundary.
+
+        Verification commands are observations, not replay of an earlier journal call. A
+        non-success envelope is intentionally inconclusive rather than a passing check.
+        """
+        call_id = "verification_" + uuid.uuid4().hex
+        journal.register(call_id, "verification_command", {"command": command})
+        journal.transition(call_id, execution.ToolCallStatus.RUNNING)
+        if not _persist():
+            ctx.verification_persistence_failed = True
+            return envelope.error_unknown_outcome("verification could not be durably started; it was not run")
+        try:
+            result = await dispatch.dispatch_tool_async(
+                "run_command", {"command": command, "timeout_seconds": timeout_seconds},
+                mcp_client, event_loop, authorization=authorization)
+            if isinstance(result, dict) and result.get("requiresPermission"):
+                # Verification never prompts. A command that needs permission is not run and cannot pass.
+                result = envelope.error_permission("verification command requires permission; it was not run")
+        except asyncio.CancelledError:
+            outcome = INTERRUPTED_RESULT
+            journal.transition(call_id, execution.ToolCallStatus.UNKNOWN, outcome, "unknown_outcome")
+            ctx.recorder.record_call(call_id, "verification_command", execution.ToolCallStatus.UNKNOWN.value)
+            _persist()
+            raise
+        except Exception as exc:
+            result = envelope.error_unknown_outcome(
+                f"verification command raised {type(exc).__name__}; its outcome is unknown and it was not retried")
+        outcome = _serialize_observation(result)
+        if isinstance(result, dict) and result.get("isError"):
+            status = (execution.ToolCallStatus.UNKNOWN
+                      if result.get("errorCategory") == envelope.CATEGORY_UNKNOWN_OUTCOME
+                      else execution.ToolCallStatus.FAILED)
+        else:
+            status = execution.ToolCallStatus.COMPLETED
+        journal.transition(call_id, status, outcome,
+                           result.get("errorCategory") if isinstance(result, dict) else None)
+        ctx.recorder.record_call(call_id, "verification_command", status.value)
+        if not _persist():
+            ctx.verification_persistence_failed = True
+            return envelope.error_unknown_outcome("verification result could not be durably saved")
+        return result
+
+    async def _verification_job(job_id: str):
+        """Inspect only a job owned by the current session owner."""
+        return await jobs.call_tool("status_job", {"job_id": job_id}, authorization)
 
     # Merge local and MCP tools
     all_tools = get_all_tools(mcp_client)
@@ -495,8 +585,49 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
 
         # 2. Check for completion
         if finish_reason == "stop":
-            ctx.recorder.end(runs.RunStatus.COMPLETED_UNVERIFIED, "the model stopped; no verification was performed",
-                             final_message=message.get("content") or "")
+            active = [criterion for criterion in ctx.criteria if criterion.run_id == ctx.recorder.run_id]
+            trusted = [criterion for criterion in active if criterion.trusted]
+            this_run_unknown = [record for record in journal.to_dicts()
+                                if record.get("tool_call_id") not in prior_call_ids
+                                and record.get("status") == "unknown"]
+            if trusted and this_run_unknown:
+                # An unresolved outcome from this run makes the acceptance claims uncertain. Verified completion
+                # is withheld; the earlier journal record is left exactly as it was.
+                ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION,
+                                 "a tool outcome from this run is unknown, so verified completion is withheld",
+                                 final_message=message.get("content") or "")
+                render.print_completion()
+                break
+            if trusted:
+                ctx.verification_attempts += 1
+                results = await verifier.verify(trusted, ctx.recorder.run_id, attempt=ctx.verification_attempts,
+                                                budget=max(1, verification_cycles),
+                                                command_runner=_verification_command,
+                                                job_checker=_verification_job)
+                ctx.verification_results.extend(results)
+                if verifier.all_passed(results) and not ctx.verification_persistence_failed:
+                    ctx.recorder.end_verified("all trusted acceptance criteria passed",
+                                              final_message=message.get("content") or "")
+                    if not _persist():
+                        ctx.recorder.mark_persistence_failure()
+                        return
+                    render.print_completion()
+                    break
+                if ctx.verification_attempts < max(1, verification_cycles):
+                    messages.append({"role": "user", "content": verifier.feedback(results)})
+                    if not _persist():
+                        ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION,
+                                         "verification feedback could not be saved; durability is unknown")
+                        return
+                    continue
+                ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION,
+                                 "required acceptance criteria did not pass within the verification budget "
+                                 f"({ctx.verification_attempts} of {max(1, verification_cycles)} attempts used)",
+                                 final_message=message.get("content") or "")
+            else:
+                ctx.recorder.end(runs.RunStatus.COMPLETED_UNVERIFIED,
+                                 "the model stopped; no verification was performed because no trusted criteria were provided",
+                                 final_message=message.get("content") or "")
             render.print_completion()
             break
 
@@ -691,7 +822,10 @@ def agent_loop(user_goal: str, system_prompt_override: Optional[str] = None, too
                session_id: Optional[str] = None, resume_messages: Optional[list] = None,
                resume_objective: Optional[str] = None, resume_summary: Optional[str] = None,
                resume_execution: Optional[list] = None, resume_runs: Optional[list] = None,
-               resume_evidence: Optional[list] = None, legacy_history: bool = False) -> "runs.RunOutcome":
+               resume_evidence: Optional[list] = None, legacy_history: bool = False,
+               criteria: Optional[list] = None, verification_cycles: int = 2,
+               resume_criteria: Optional[list] = None,
+               resume_verification_results: Optional[list] = None) -> "runs.RunOutcome":
     """Synchronous entry point that sets up async context. Returns the run's RunOutcome.
 
     Args:
@@ -729,7 +863,9 @@ def agent_loop(user_goal: str, system_prompt_override: Optional[str] = None, too
             user_goal, mcp_client, event_loop, system_prompt_override, tool_allowlist_override,
             session_id=session_id, resume_messages=resume_messages, resume_objective=resume_objective,
             resume_summary=resume_summary, resume_execution=resume_execution, resume_runs=resume_runs,
-            resume_evidence=resume_evidence, legacy_history=legacy_history))
+            resume_evidence=resume_evidence, legacy_history=legacy_history,
+            criteria=criteria, verification_cycles=verification_cycles,
+            resume_criteria=resume_criteria, resume_verification_results=resume_verification_results))
 
     finally:
         # Close MCP connections

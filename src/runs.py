@@ -54,7 +54,7 @@ class RunStatus(str, Enum):
 
 RESERVED_STATUSES = frozenset({RunStatus.COMPLETED_VERIFIED})
 _RUNTIME_STATUSES = frozenset(s.value for s in RunStatus if s not in RESERVED_STATUSES)
-_PERSISTED_STATUSES = _RUNTIME_STATUSES | {RUNNING}
+_PERSISTED_STATUSES = _RUNTIME_STATUSES | {RUNNING} | {RunStatus.COMPLETED_VERIFIED.value}
 
 
 class Provenance(str, Enum):
@@ -344,6 +344,21 @@ class RunRecorder:
             self.reason = reason[:MAX_REASON_CHARS]
             if final_message is not None:
                 self.final_message = final_message[:MAX_FINAL_MESSAGE_CHARS]
+
+    def end_verified(self, reason: str, final_message: Optional[str] = None) -> None:
+        """Set verified completion after an independent verification gate has passed."""
+        if self.status is not None:
+            raise RunRecordError("a run can only be verified before a terminal status is recorded")
+        self.status = RunStatus.COMPLETED_VERIFIED.value
+        self.reason = reason[:MAX_REASON_CHARS]
+        self.final_message = (final_message[:MAX_FINAL_MESSAGE_CHARS]
+                              if final_message is not None else None)
+
+    def mark_persistence_failure(self) -> None:
+        """Downgrade an in-memory verified result when its required save failed."""
+        if self.status == RunStatus.COMPLETED_VERIFIED.value:
+            self.status = RunStatus.NEEDS_ATTENTION.value
+            self.reason = "verification passed, but the verified result was not saved"
 
     @property
     def open(self) -> bool:

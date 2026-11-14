@@ -9,6 +9,7 @@ from typing import Dict, Any, List, Optional
 from .compaction import SUMMARY_MARKER, RECENT_USER_MARKER
 from .execution import ExecutionJournal, ExecutionStateError, ToolCallStatus, INTERRUPTED_RESULT, SKIPPED_RESULT
 from . import runs as run_records
+from . import acceptance, verification
 
 
 SESSIONS_DIR = Path.home() / ".agent_loop" / "sessions"
@@ -16,6 +17,7 @@ SESSIONS_DIR = Path.home() / ".agent_loop" / "sessions"
 # Format 5 adds run outcomes and evidence records. Format 4 sessions still load; their run history is
 # explicitly unrecorded (legacy_history), never reconstructed.
 SESSION_FORMAT = 5
+VERIFICATION_SESSION_FORMAT = 6
 RUN_HISTORY_FIELDS = ("runs", "evidence", "legacy_history")
 
 
@@ -46,6 +48,10 @@ def validate_session_data(data: Dict[str, Any]) -> str:
 
     if stored_format == 5:
         _validate_format_five(data, messages)
+        return "structured"
+
+    if stored_format == VERIFICATION_SESSION_FORMAT:
+        _validate_format_six(data, messages)
         return "structured"
 
     if stored_format == 4:
@@ -128,7 +134,41 @@ def _validate_format_five(data: Dict[str, Any], messages: List[Any]) -> None:
         run_records.validate_run_history(data.get("runs"), data.get("evidence"))
     except run_records.RunRecordError as exc:
         raise SessionValidationError(f"invalid run history: {exc}") from exc
+    if data.get("format") == SESSION_FORMAT and any(
+            item.get("status") == run_records.RunStatus.COMPLETED_VERIFIED.value
+            for item in data.get("runs", [])):
+        raise SessionValidationError("completed_verified requires session format 6 verification state")
     _validate_evidence_references(data, journal)
+
+
+def _validate_format_six(data: Dict[str, Any], messages: List[Any]) -> None:
+    """Format 5 plus immutable, run-owned criteria and verification observations."""
+    _validate_format_five(data, messages)
+    required = {"criteria", "verification_results"}
+    if not required.issubset(data):
+        raise SessionValidationError("format 6 is missing acceptance-criteria fields")
+    try:
+        criteria = acceptance.validate_criteria(data["criteria"])
+        verification.validate_results(data["verification_results"], criteria)
+    except (ValueError, TypeError) as exc:
+        raise SessionValidationError(f"invalid format 6 verification state: {exc}") from exc
+    criterion_ids = {criterion.criterion_id for criterion in criteria}
+    results = verification.validate_results(data["verification_results"], criteria)
+    run_statuses = {raw.get("run_id"): raw.get("status") for raw in data.get("runs", [])}
+    try:
+        verification.validate_attempt_history(results, criteria, run_statuses)
+    except ValueError as exc:
+        raise SessionValidationError(f"invalid verification attempt history: {exc}") from exc
+    for raw in data.get("runs", []):
+        if raw.get("status") == run_records.RunStatus.COMPLETED_VERIFIED.value:
+            run_id = raw.get("run_id")
+            # Only the latest attempt for each required criterion decides; earlier failures stay in history
+            latest = verification.VerificationEngine.current(item for item in results if item.run_id == run_id)
+            passed = {criterion_id for criterion_id, item in latest.items()
+                      if item.status == verification.VerificationStatus.PASSED.value}
+            required_for_run = {criterion.criterion_id for criterion in criteria if criterion.run_id == run_id and criterion.trusted}
+            if not required_for_run or not required_for_run.issubset(passed):
+                raise SessionValidationError(f"verified run {run_id} lacks passed trusted criteria")
 
 
 def _validate_evidence_references(data: Dict[str, Any], journal: ExecutionJournal) -> None:
@@ -153,7 +193,7 @@ def resume_history(data: Dict[str, Any]) -> tuple:
     Format 5 history is returned with interrupted runs recovered. Older sessions have no recorded history,
     so they return an empty history and legacy_history=True. Nothing is reconstructed for them.
     """
-    if data.get("format") == 5:
+    if data.get("format") in (5, VERIFICATION_SESSION_FORMAT):
         return run_records.recover_interrupted(data["runs"]), list(data["evidence"]), bool(data["legacy_history"])
     return [], [], True
 
@@ -245,11 +285,13 @@ def build_candidate(session_id: str, goal: str, messages: List[Dict[str, Any]],
                     execution: Optional[List[Dict[str, Any]]] = None,
                     runs: Optional[List[Dict[str, Any]]] = None,
                     evidence: Optional[List[Dict[str, Any]]] = None,
-                    legacy_history: bool = False) -> Dict[str, Any]:
+                    legacy_history: bool = False,
+                    criteria: Optional[List[Dict[str, Any]]] = None,
+                    verification_results: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """The complete format-5 session document that would be written."""
     # ``goal`` remains display/CLI metadata for compatibility; ``objective`` is authoritative.
-    return {
-        "format": SESSION_FORMAT,
+    document = {
+        "format": VERIFICATION_SESSION_FORMAT if criteria is not None or verification_results is not None else SESSION_FORMAT,
         "session_id": session_id,
         "goal": goal,
         "objective": objective if objective is not None else f"Objective: {goal}",
@@ -261,6 +303,10 @@ def build_candidate(session_id: str, goal: str, messages: List[Dict[str, Any]],
         "legacy_history": bool(legacy_history),
         "saved_at": datetime.now().isoformat(),
     }
+    if document["format"] == VERIFICATION_SESSION_FORMAT:
+        document["criteria"] = criteria if criteria is not None else []
+        document["verification_results"] = verification_results if verification_results is not None else []
+    return document
 
 
 def save_session(session_id: str, goal: str, messages: List[Dict[str, Any]],
@@ -268,8 +314,10 @@ def save_session(session_id: str, goal: str, messages: List[Dict[str, Any]],
                  execution: Optional[List[Dict[str, Any]]] = None,
                  runs: Optional[List[Dict[str, Any]]] = None,
                  evidence: Optional[List[Dict[str, Any]]] = None,
-                 legacy_history: bool = False) -> None:
-    """Save session state to disk (format 5).
+                 legacy_history: bool = False,
+                 criteria: Optional[List[Dict[str, Any]]] = None,
+                 verification_results: Optional[List[Dict[str, Any]]] = None) -> None:
+    """Save session state to disk (format 5 or format 6 when verification state is present).
 
     The candidate is validated with the loader's own rules before anything touches the disk. An invalid
     candidate raises SessionValidationError and leaves the previously saved file exactly as it was.
@@ -277,7 +325,8 @@ def save_session(session_id: str, goal: str, messages: List[Dict[str, Any]],
     _ensure_dir()
     candidate = build_candidate(session_id, goal, messages, objective=objective, summary=summary,
                                 execution=execution, runs=runs, evidence=evidence,
-                                legacy_history=legacy_history)
+                                legacy_history=legacy_history, criteria=criteria,
+                                verification_results=verification_results)
     validate_session_data(candidate)
 
     session_path = SESSIONS_DIR / f"{session_id}.json"

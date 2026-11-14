@@ -81,6 +81,8 @@ python3 agent_loop.py repl
 
 All goals entered in one `repl` run share one session. Background jobs started by a goal keep running for later goals in that session. Leaving the REPL closes the session and stops its jobs. Approvals given with "Yes, this session" last for that session only. An unlisted command is approved by its exact text, and an MCP tool by its name. Codebase-search state is also session-local and is not saved.
 
+The runtime API (`AgentSession.run_goal(goal, criteria=...)`) can attach acceptance criteria to a goal; the CLI does not. Trusted criteria are checked by the runtime when the model stops. Model-proposed criteria are not trusted, and a model statement alone never makes a run verified. Sessions with criteria are saved as format 6.
+
 ### Targeted: Use agent expertise
 ```bash
 python3 agent_loop.py agent coder "Implement user authentication with JWT"

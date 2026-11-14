@@ -207,18 +207,21 @@ def _main(args=None):
             objective = session_data.get("objective")
             summary = session_data.get("summary")
             execution = session_data.get("execution", [])
-            resume_kwargs = {
+            # Merge, never replace: the run history and legacy flag above must still reach the loop
+            resume_kwargs.update({
                 "resume_objective": objective,
                 "resume_summary": summary,
                 "resume_execution": execution,
-            }
+                "resume_criteria": session_data.get("criteria", []),
+                "resume_verification_results": session_data.get("verification_results", []),
+            })
         else:
             legacy_objective = next(
                 (m.get("content") for m in messages if m.get("role") == "user"),
                 None,
             )
             if isinstance(legacy_objective, str):
-                resume_kwargs = {"resume_objective": legacy_objective}
+                resume_kwargs["resume_objective"] = legacy_objective
 
         print(f"📂 Resuming session: {session_data.get('goal', 'Unknown goal')}")
         _report(loop.agent_loop(

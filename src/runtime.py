@@ -102,6 +102,8 @@ def _state_from_saved(data: Dict[str, Any]) -> Dict[str, Any]:
         "objective": objective,
         "summary": summary,
         "execution": execution,
+        "criteria": data.get("criteria", []),
+        "verification_results": data.get("verification_results", []),
         "runs": list(prior_runs),
         "evidence": list(prior_evidence),
         "legacy_history": bool(legacy_history),
@@ -303,7 +305,8 @@ class AgentSession:
         """Persisted run records for this session, in order. Previous outcomes are never rewritten."""
         return list(self._state["runs"]) if self._state else []
 
-    async def run_goal(self, goal: str) -> "runs.RunOutcome":
+    async def run_goal(self, goal: str, criteria: Optional[list] = None,
+                       verification_cycles: int = 2) -> "runs.RunOutcome":
         """Run one goal in this session. Cancellation interrupts the run, not the session."""
         # Check and mark busy in one step with no await in between, under the state lock
         with self._runtime._state_lock:
@@ -318,6 +321,7 @@ class AgentSession:
                 goal, self._mcp, self._runtime.event_loop,
                 session_id=self.session_id, owner=self.session_id, keep_jobs=True,
                 authorization=self.authorization, session_goal=session_goal, continuation=continuation,
+                criteria=criteria, verification_cycles=verification_cycles,
                 **self._resume_kwargs())
         finally:
             self._busy = False
@@ -388,6 +392,8 @@ class AgentSession:
             "resume_runs": state["runs"],
             "resume_evidence": state["evidence"],
             "legacy_history": state["legacy_history"],
+            "resume_criteria": state.get("criteria", []),
+            "resume_verification_results": state.get("verification_results", []),
         }
 
     def _reconcile(self, outcome: Optional["runs.RunOutcome"], before: int, session_goal: str) -> None:

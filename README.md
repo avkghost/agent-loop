@@ -598,7 +598,17 @@ Recoverable tool errors do not end a run. The model sees the error and can conti
 
 **Evidence** records are runtime observations taken from the execution journal. Each names the journal call it came from, and each carries a short summary, never the tool's output. A completed call is a success observation, and an unknown call is an unknown observation, never a success. A model's own statements are not evidence, so a run is never verified because its output says so.
 
+**Acceptance criteria.** A program that calls the runtime API (`AgentSession.run_goal(goal, criteria=...)` or `agent_loop_async(..., criteria=...)`) may attach bounded criteria to a goal. The CLI does not supply criteria. Four criterion types are supported: a contained file exists, a bounded file-content check, a command with an expected exit code, and an owned managed job in an expected state. Criteria are bound to the run that receives them, and they cannot be changed or moved to another run.
+
+Only trusted criteria (origin `user` or `trusted`) are verified. A criterion proposed by the model (origin `model`) is never trusted: it cannot satisfy a missing requirement, and it cannot make a run verified.
+
+When the model stops without requesting tools, the runtime checks the trusted criteria itself. A passing check set produces `completed_verified`. A failing or inconclusive set returns the failed criteria to the model. This repeats for at most `verification_cycles` attempts (default 2); then the run ends as `needs_attention`. A run with no trusted criteria ends as `completed_unverified`.
+
+Verification commands run only through the normal authorization policy. Verification never prompts: a command that needs permission is not run, and its journal record is `failed`. A timeout, a signal, an unconfirmed exit status, a dispatch exception, or an unknown outcome is inconclusive and never counts as a pass. If this run has an unknown tool outcome, verified completion is withheld. Earlier journal records are not changed by verification.
+
 **Session format 5** stores runs and evidence next to the conversation and the journal. Sessions in formats 2 to 4 still load, and their earlier history is recorded as unrecorded (`legacy_history`). Nothing is reconstructed for them. A run that was still open when the process ended is recovered as `interrupted`, and it is never re-executed.
+
+Sessions that contain acceptance criteria are saved as format 6, which adds the run-owned `criteria` and `verification_results` fields. Each verification observation records its attempt number and the cycle budget it ran under. Attempt numbers are per run and shared by all of that run's criteria, start at 1, have no gaps, and never exceed the budget (1 to 10, default 2). Every persisted cycle covers every trusted criterion, and earlier attempts are kept. A run is `completed_verified` only if the latest attempt passed every trusted criterion. Format 5 and earlier sessions still load, and format 5 cannot carry `completed_verified`. A failed save of a verified result is reported as `needs_attention`, never as verified success.
 
 ### Managed Background Jobs
 

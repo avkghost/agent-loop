@@ -504,7 +504,11 @@ async def _terminate(proc: subprocess.Popen, readers, transports, outcome: str, 
         text = _format_result(status, readers[0].result(), readers[1].result())
         if not swept:
             text += "\n[warning: could not confirm that the command's process group is empty]"
-        return envelope.success(text)
+        result = envelope.success(text)
+        # Structured status for callers that must not infer it from output text (verification)
+        result["exitCode"] = status
+        result["processGroupEmpty"] = bool(swept)
+        return result
     finally:
         await _discard(readers, transports)
         _retain(proc)
