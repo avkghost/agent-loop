@@ -115,7 +115,8 @@ MAX_TOKENS = 131072                                           # Total conversati
 
 # Token Management (CRITICAL)
 MODEL_CONTEXT_WINDOW = 131072                                 # Model's actual context
-REQUEST_MAX_TOKENS = 8192                                     # Per-request limit
+REQUEST_MAX_TOKENS = 8192                                     # Per-request output limit (YAML-settable, positive integer)
+TEMPERATURE = None                                            # Explicit temperature 0-2; None leaves LM Studio's setting in effect
 
 ALLOWED_TOOLS = {"ls", "cat", "grep", ...}                   # Allowed shell commands
 ```

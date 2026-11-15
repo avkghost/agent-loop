@@ -19,9 +19,10 @@ COMPACT_THRESHOLD = 0.8  # Start compacting at 80% of limit
 # Model context window and per-request limits
 MODEL_CONTEXT_WINDOW = 131072  # Model's context window size (currently loaded with 131K)
 # Common values: 4096 (small), 8192, 16384, 32768, 65536, 131072 (large)
-REQUEST_MAX_TOKENS = 8192  # Per-request output limit (increased for 131K context model)
-# Formula: min(4096, MODEL_CONTEXT_WINDOW // 3) for auto-calculation
-# Set REQUEST_MAX_TOKENS explicitly if you want different behavior
+REQUEST_MAX_TOKENS = 8192  # Per-request output limit (increased for 131K context model); YAML: REQUEST_MAX_TOKENS
+# Sampling temperature sent with each request. None (default) omits the field, so LM Studio's own setting applies.
+# YAML: TEMPERATURE, a number from 0 to 2, or null.
+TEMPERATURE = None
 
 # Tool allowlists and state
 ALLOWED_TOOLS = {

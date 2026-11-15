@@ -324,7 +324,7 @@ Check for: logic errors, edge cases, performance issues, and security vulnerabil
 ## Agents & Skills
 
 ### Agents (Personas)
-Agents are AI personas with specific expertise and tool access. Each has a custom system prompt, temperature, and allowed tools.
+Agents are AI personas with specific expertise and tool access. Each has a custom system prompt and allowed tools. The `temperature` and `max_tokens` settings in an agent file are parsed but not applied to requests: the primary loop uses the global generation settings described under Configuration.
 
 **Available Agents:**
 
@@ -387,7 +387,8 @@ COMPACT_THRESHOLD = 0.8                # Start compacting at 80%
 
 # Model Context Window
 MODEL_CONTEXT_WINDOW = 131072          # Model's actual context window
-REQUEST_MAX_TOKENS = 8192              # Per-request output limit
+REQUEST_MAX_TOKENS = 8192              # Per-request output limit (YAML: REQUEST_MAX_TOKENS)
+TEMPERATURE = None                     # Explicit sampling temperature (YAML: TEMPERATURE); None = LM Studio's setting
 
 # Tool Access
 ALLOWED_TOOLS = {"ls", "cat", "grep", "find", ...}
@@ -397,7 +398,15 @@ ALLOW_ALL = False                      # CLI --allow flag
 
 **Important:** Update `MODEL_CONTEXT_WINDOW` to match your loaded model's actual context size. See [Token Management](#token-management) for details.
 
-The name `LM_STUDIO_URL` is retained for compatibility, but it is used as the generic API endpoint for the selected backend. The current implementation has no separate provider or authentication setting. YAML configuration files can override `LM_STUDIO_URL`, `MODEL_NAME`, `MAX_ITERATIONS`, `MAX_TOKENS`, `COMPACT_THRESHOLD`, and `ALLOWED_TOOLS`; `MODEL_CONTEXT_WINDOW` and `REQUEST_MAX_TOKENS` are defined in `src/config.py` and are not YAML overrides.
+The name `LM_STUDIO_URL` is retained for compatibility, but it is used as the generic API endpoint for the selected backend. The current implementation has no separate provider or authentication setting. YAML configuration files can override `LM_STUDIO_URL`, `MODEL_NAME`, `MAX_ITERATIONS`, `MAX_TOKENS`, `COMPACT_THRESHOLD`, `ALLOWED_TOOLS`, `REQUEST_MAX_TOKENS`, and `TEMPERATURE`. `MODEL_CONTEXT_WINDOW` is defined in `src/config.py` only.
+
+**Generation parameters: who decides what.**
+- *LM Studio's sampling settings* (for example temperature when `TEMPERATURE` is unset, `top_p`, `top_k`, penalties, seed, and reasoning budget) are the default. Agent Loop never sends those fields.
+- *Explicit Agent Loop override.* `TEMPERATURE` (a number from 0 to 2, or `null` for LM Studio's setting) is sent only when it is set. Invalid values are rejected at startup, before any request is built.
+- *Conversation token budget.* `MAX_TOKENS` limits the whole conversation, and it triggers compaction. It is never sent to the model.
+- *Per-request output limit.* `REQUEST_MAX_TOKENS` (default 8192, a positive integer) is always sent as `max_tokens`. It cannot be disabled.
+- *Compaction* uses its own fixed options (temperature 0.3, 500 output tokens), which are unaffected by these settings.
+- *Agent files.* The `temperature` and `max_tokens` values in an agent file are parsed but not used by the primary loop; they have no effect on requests.
 
 ### MCP Servers (mcp_servers.json)
 
@@ -453,7 +462,7 @@ llama-server -m /path/to/GLM-4.7-Flash.gguf -c 131072 --jinja --port 8080
 python3 agent_loop.py run "Fix the bug" --config agent_loop.llamacpp.yaml
 ```
 
-This example requires a `llama-server` endpoint compatible with the client's OpenAI-style streaming chat-completions and tool-call format. The context size is set by the server's `-c` flag. Only `LM_STUDIO_URL`, `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `COMPACT_THRESHOLD`, and `ALLOWED_TOOLS` can be set from a YAML file. `MODEL_CONTEXT_WINDOW` and `REQUEST_MAX_TOKENS` must be changed in `src/config.py`.
+This example requires a `llama-server` endpoint compatible with the client's OpenAI-style streaming chat-completions and tool-call format. The context size is set by the server's `-c` flag. `LM_STUDIO_URL`, `MODEL_NAME`, `MAX_TOKENS`, `MAX_ITERATIONS`, `COMPACT_THRESHOLD`, `ALLOWED_TOOLS`, `REQUEST_MAX_TOKENS`, and `TEMPERATURE` can be set from a YAML file. `MODEL_CONTEXT_WINDOW` must be changed in `src/config.py`.
 
 ### Response Caching
 

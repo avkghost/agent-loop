@@ -137,8 +137,10 @@ def messages_to_input(messages: List[Dict[str, Any]]) -> Tuple[Optional[str], Li
 def build_request(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],
                   options: GenerationOptions) -> Dict[str, Any]:
     instructions, items = messages_to_input(messages)
-    body: Dict[str, Any] = {"model": options.model, "input": items, "temperature": options.temperature,
+    body: Dict[str, Any] = {"model": options.model, "input": items,
                             "max_output_tokens": options.max_tokens, "stream": True, "store": False}
+    if options.temperature is not None:  # omitted when unset, as in the Chat Completions request
+        body["temperature"] = options.temperature
     if instructions is not None:
         body["instructions"] = instructions
     declared = tools_to_responses(tools)

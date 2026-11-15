@@ -5,6 +5,7 @@ transport exception classes. Every outcome of a model request is returned as a P
 cancellation propagates as asyncio.CancelledError. A failure is never a completed turn.
 """
 
+import math
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Protocol, Tuple
@@ -69,12 +70,34 @@ class ProviderError:
     excerpt: Optional[str] = None
 
 
+def validate_temperature(value: Any) -> Optional[float]:
+    """None omits the field (LM Studio's setting applies). Otherwise a finite number from 0 to 2."""
+    if value is None:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) \
+            or not 0 <= value <= 2:
+        raise ValueError(f"temperature must be omitted (null) or a number from 0 to 2, not {value!r}")
+    return float(value)
+
+
+def validate_max_tokens(value: Any) -> int:
+    """The per-request output limit. It is always set: a positive integer."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(f"REQUEST_MAX_TOKENS must be a positive integer, not {value!r}")
+    return value
+
+
 @dataclass(frozen=True)
 class GenerationOptions:
+    # Read from configuration when the options are created, so a value loaded from YAML after import still applies
     model: str = config.MODEL_NAME
-    temperature: float = 0.2
-    max_tokens: int = config.REQUEST_MAX_TOKENS
+    temperature: Optional[float] = field(default_factory=lambda: config.TEMPERATURE)
+    max_tokens: int = field(default_factory=lambda: config.REQUEST_MAX_TOKENS)
     stream: bool = True
+
+    def __post_init__(self) -> None:
+        validate_temperature(self.temperature)
+        validate_max_tokens(self.max_tokens)
 
 
 @dataclass
@@ -104,13 +127,11 @@ class ModelProvider(Protocol):
 
 def build_payload(messages: List[Dict[str, Any]], tools: Optional[List[Dict[str, Any]]],
                   options: GenerationOptions) -> Dict[str, Any]:
-    payload: Dict[str, Any] = {
-        "model": options.model,
-        "messages": messages,
-        "temperature": options.temperature,
-        "max_tokens": options.max_tokens,
-        "stream": options.stream,
-    }
+    payload: Dict[str, Any] = {"model": options.model, "messages": messages}
+    if options.temperature is not None:  # omitted, not null: LM Studio's own sampling setting applies
+        payload["temperature"] = options.temperature
+    payload["max_tokens"] = options.max_tokens
+    payload["stream"] = options.stream
     if tools is not None:
         payload["tools"] = tools
         payload["tool_choice"] = "auto"

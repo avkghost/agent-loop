@@ -59,6 +59,8 @@ def apply_config_overrides(config: Dict[str, Any]) -> None:
         "MAX_TOKENS": "MAX_TOKENS",
         "COMPACT_THRESHOLD": "COMPACT_THRESHOLD",
         "ALLOWED_TOOLS": "ALLOWED_TOOLS",
+        "REQUEST_MAX_TOKENS": "REQUEST_MAX_TOKENS",
+        "TEMPERATURE": "TEMPERATURE",
     }
 
     for config_key, attr_name in mappings.items():
@@ -68,6 +70,12 @@ def apply_config_overrides(config: Dict[str, Any]) -> None:
             # Type conversions for numeric values
             if attr_name in ("MAX_ITERATIONS", "MAX_TOKENS"):
                 value = int(value)
+            elif attr_name == "REQUEST_MAX_TOKENS":
+                from .provider import validate_max_tokens
+                value = validate_max_tokens(int(value))
+            elif attr_name == "TEMPERATURE":
+                from .provider import validate_temperature
+                value = validate_temperature(None if value in (None, "", "null") else float(value))
             elif attr_name == "COMPACT_THRESHOLD":
                 value = float(value)
             elif attr_name == "ALLOWED_TOOLS" and isinstance(value, str):
