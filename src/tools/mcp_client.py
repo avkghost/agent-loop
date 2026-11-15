@@ -2,11 +2,58 @@
 
 import asyncio
 import contextlib
+import copy
 import json
 from contextlib import AsyncExitStack
 from typing import Dict, Any, Optional
 
 from .. import envelope
+
+_MISSING = object()
+
+
+class MCPContractError(ValueError):
+    """An MCP tool does not provide the schema Agent Loop needs. The tool is not offered to the model."""
+
+
+def tool_parameters(tool: Any) -> Dict[str, Any]:
+    """The parameter schema for an SDK tool (mcp.types.Tool), copied from its input_schema.
+
+    Nothing is invented. A missing, non-object, or malformed schema raises MCPContractError instead of becoming an
+    empty parameter list. A declared object without properties means the tool takes no arguments.
+    """
+    name = getattr(tool, "name", "<unnamed>")
+    schema = getattr(tool, "input_schema", _MISSING)
+    if schema is _MISSING:
+        raise MCPContractError(f"tool {name}: the SDK tool has no input_schema attribute")
+    if not isinstance(schema, dict):
+        raise MCPContractError(f"tool {name}: input_schema is not a JSON object")
+    if schema.get("type") != "object":
+        raise MCPContractError(f"tool {name}: input_schema must declare type 'object'")
+    properties = schema.get("properties", {})
+    if not isinstance(properties, dict):
+        raise MCPContractError(f"tool {name}: input_schema properties must be an object")
+    required = schema.get("required", [])
+    if not isinstance(required, list) or not all(isinstance(item, str) for item in required):
+        raise MCPContractError(f"tool {name}: input_schema required must be a list of property names")
+    parameters = copy.deepcopy(schema)
+    parameters.pop("$schema", None)  # a dialect marker, not a parameter; the provider does not need it
+    parameters["properties"] = copy.deepcopy(properties)
+    parameters["required"] = list(required)
+    return parameters
+
+
+def offered_tools(listed: Any) -> list:
+    """The discovered tools that satisfy the schema contract. Each excluded tool is reported, never silently dropped."""
+    accepted = []
+    for tool in listed:
+        try:
+            tool_parameters(tool)
+        except MCPContractError as exc:
+            print(f"  ⚠️ Not offered to the model: {exc}")
+            continue
+        accepted.append(tool)
+    return accepted
 
 
 class MCPClientManager:
@@ -72,9 +119,10 @@ class MCPClientManager:
                     await self.exit_stack.enter_async_context(session)
                     await session.initialize()
 
-                    # Discover tools
+                    # Discover tools. A tool whose schema breaks the contract is reported and not offered to the model.
                     response = await session.list_tools()
-                    tools = response.tools if hasattr(response, "tools") else []
+                    listed = response.tools if hasattr(response, "tools") else []
+                    tools = offered_tools(listed)
 
                     self.sessions[server_name] = session
                     self.tools_cache[server_name] = tools
@@ -95,27 +143,16 @@ class MCPClientManager:
 
         for server_name, server_tools in self.tools_cache.items():
             for tool in server_tools:
-                # Transform MCP tool schema to OpenAI format
+                # The tool's declared schema, copied whole, is what the model sees. Tools whose schema does not
+                # satisfy the contract were already excluded at discovery, so this does not fail here.
                 openai_tool = {
                     "type": "function",
                     "function": {
                         "name": f"mcp_{server_name}_{tool.name}",
                         "description": tool.description or f"Tool from {server_name}",
-                        "parameters": {
-                            "type": "object",
-                            "properties": {},
-                            "required": []
-                        }
+                        "parameters": tool_parameters(tool),
                     }
                 }
-
-                # Map input schema to parameters if present
-                if hasattr(tool, "inputSchema") and tool.inputSchema:
-                    schema = tool.inputSchema
-                    if isinstance(schema, dict):
-                        openai_tool["function"]["parameters"]["properties"] = schema.get("properties", {})
-                        openai_tool["function"]["parameters"]["required"] = schema.get("required", [])
-
                 tools.append(openai_tool)
 
         return tools
@@ -139,6 +176,15 @@ class MCPClientManager:
             return envelope.error_validation(
                 f"No connection to MCP server: {server_name}",
                 fixable=False
+            )
+
+        # Only tools that passed schema discovery are callable. A tool the server did not list, or one excluded for a
+        # schema that breaks the contract, is rejected here, before anything is sent to the server.
+        if tool_name not in {tool.name for tool in self.tools_cache.get(server_name, [])}:
+            return envelope.error_validation(
+                f"MCP tool {prefixed_name} is not an advertised tool of server {server_name}; it was not sent.",
+                fixable=False,
+                description="The tool was not listed by the server or did not pass schema discovery. It was not called.",
             )
 
         # Everything below happens after the call may have been submitted, so any failure

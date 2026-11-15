@@ -48,9 +48,12 @@ class _SessionThatFails:
 
 
 def _real_client_with(session):
+    from mcp.types import Tool
     from src.tools.mcp_client import MCPClientManager
     client = MCPClientManager()
     client.sessions = {"remote": session}
+    # The server advertises the tool (its schema passed discovery), so the call reaches the session
+    client.tools_cache = {"remote": [Tool(name="write", input_schema={"type": "object", "properties": {}})]}
     return client
 
 

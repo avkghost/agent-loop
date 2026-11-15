@@ -9,6 +9,7 @@ CATEGORY_VALIDATION = "validation"    # Invalid input format, malformed data
 CATEGORY_BUSINESS = "business"        # Business rule violation (not used in this agent)
 CATEGORY_PERMISSION = "permission"    # Access denied, path outside boundary
 CATEGORY_UNKNOWN_OUTCOME = "unknown_outcome"  # Tool raised; its side effects may or may not have happened
+CATEGORY_MCP_ERROR = "mcp_error"      # The remote MCP tool returned an error result (SDK is_error: true)
 
 def success(content: str) -> Dict[str, Any]:
     """Successful tool result (not an error)."""
@@ -76,12 +77,25 @@ def error_unknown_outcome(content: str, description: Optional[str] = None) -> Di
 _MISSING = object()
 
 
-def mcp_result_envelope(tool_name: str, result: Any) -> Dict[str, Any]:
-    """Convert an MCP call result into an envelope, validating its structure first.
+def error_mcp(content: str, description: Optional[str] = None) -> Dict[str, Any]:
+    """The remote MCP tool returned an error result (the SDK's is_error flag). The call was dispatched, and a remote
+    error does not prove that no side effect occurred, so the runtime records the outcome as unknown. It is not retried."""
+    return {
+        "content": content,
+        "isError": True,
+        "errorCategory": CATEGORY_MCP_ERROR,
+        "isRetryable": False,
+        "description": description,
+    }
 
-    A result that is missing, has an unexpected shape, or has malformed content is never
-    reported as success: the call was already submitted, so its outcome is unknown.
-    Valid empty content is a successful empty result.
+
+def mcp_result_envelope(tool_name: str, result: Any) -> Dict[str, Any]:
+    """Convert an MCP SDK call result (mcp.types.CallToolResult) into an envelope, validating its structure first.
+
+    Success requires an explicit boolean is_error of False. An is_error of True is a failed call with the server's
+    message. A result that is missing, has an unexpected shape, has no boolean is_error, or has malformed content is
+    never reported as success: the call was already submitted, so its outcome is unknown. Valid empty content is a
+    successful empty result.
     """
     malformed = error_unknown_outcome(
         f"MCP tool {tool_name} returned a malformed response; its outcome cannot be verified. It was not retried.",
@@ -89,12 +103,8 @@ def mcp_result_envelope(tool_name: str, result: Any) -> Dict[str, Any]:
     )
     if result is None:
         return malformed
-    if isinstance(result, dict):
-        content = result.get("content", _MISSING)
-        is_error = result.get("isError", False)
-    else:
-        content = getattr(result, "content", _MISSING)
-        is_error = getattr(result, "isError", False)
+    content = getattr(result, "content", _MISSING)
+    is_error = getattr(result, "is_error", _MISSING)
     if content is _MISSING or not isinstance(content, list) or not isinstance(is_error, bool):
         return malformed
 
@@ -112,10 +122,9 @@ def mcp_result_envelope(tool_name: str, result: Any) -> Dict[str, Any]:
             return malformed
     body = "\n".join(parts)
     if is_error:
-        return error_unknown_outcome(
+        return error_mcp(
             body or f"MCP tool {tool_name} reported an error.",
-            description="The remote tool reported an error after the call was submitted; "
-                        "side effects may have occurred. It was not retried.",
+            description="The remote tool reported an error. It was not retried.",
         )
     return success(body)
 

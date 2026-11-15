@@ -18,6 +18,7 @@ from src import config, dispatch, envelope, execution, loop, session
 from src.session import SessionValidationError, validate_session_data
 from src.tools import files
 from src.tools.mcp_client import MCPClientManager
+from mcp.types import CallToolResult, ImageContent, TextContent
 from tests.conftest import make_streamed_response, protocol_violations
 
 
@@ -63,9 +64,16 @@ def run_agent(monkeypatch, replies, *, mcp_client=None, session_id=None, **kwarg
     return llm
 
 
+def advertising(client, server, *names):
+    """The tools the server advertises after schema discovery. A call to any other name is refused before the session."""
+    from mcp.types import Tool
+    client.tools_cache = {server: [Tool(name=n, input_schema={"type": "object", "properties": {}}) for n in names]}
+    return client
+
+
 def mcp_run(monkeypatch, tmp_sessions, behaviour, tool="mcp_remote_write", session_id="mcp-run"):
     transport = FakeTransport(behaviour)
-    client = MCPClientManager()
+    client = advertising(MCPClientManager(), "remote", "write")
     client.sessions = {"remote": transport}
     monkeypatch.setattr(config, "ALLOWED_MCP_TOOLS", {tool})
     llm = run_agent(monkeypatch, [
@@ -89,7 +97,7 @@ def envelope_of(tool_msg):
 
 def test_h1_mcp_call_reaches_transport_through_agent_loop_and_is_journaled(monkeypatch, tmp_sessions):
     async def ok(name, arguments):
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text=f"wrote {arguments['path']}")], isError=False)
+        return CallToolResult(content=[TextContent(type="text", text=f"wrote {arguments['path']}")], is_error=False)
 
     transport, tool_msg, record, _ = mcp_run(monkeypatch, tmp_sessions, ok)
 
@@ -103,8 +111,8 @@ def test_h1_sync_dispatch_inside_running_loop_is_not_nested(monkeypatch):
     seen = {}
 
     async def scenario():
-        client = MCPClientManager()
-        client.sessions = {"remote": FakeTransport(lambda n, a: asyncio.sleep(0, result=SimpleNamespace(content=[], isError=False)))}
+        client = advertising(MCPClientManager(), "remote", "write")
+        client.sessions = {"remote": FakeTransport(lambda n, a: asyncio.sleep(0, result=CallToolResult(content=[], is_error=False)))}
         monkeypatch.setattr(config, "ALLOWED_MCP_TOOLS", {"mcp_remote_write"})
         seen["result"] = await dispatch.dispatch_tool_async("mcp_remote_write", {}, client, asyncio.get_running_loop())
 
@@ -118,12 +126,15 @@ def test_h1_sync_dispatch_inside_running_loop_is_not_nested(monkeypatch):
 
 @pytest.mark.parametrize("result", [
     None,
-    SimpleNamespace(isError=False),                                 # missing content
-    SimpleNamespace(content="just a string", isError=False),         # content not a list
-    SimpleNamespace(content=[object()], isError=False),             # item with no text and no type
-    SimpleNamespace(content=[], isError="no"),                      # isError not a bool
-    {"content": "raw dict is not a result"},                        # dict without isError handling
-], ids=["none", "no-content", "content-str", "bad-item", "bad-iserror", "dict-missing-iserror"])
+    SimpleNamespace(is_error=False),                                # missing content
+    SimpleNamespace(content="just a string", is_error=False),       # content not a list
+    SimpleNamespace(content=[object()], is_error=False),            # item with no text and no type
+    SimpleNamespace(content=[], is_error="no"),                     # is_error not a bool
+    SimpleNamespace(content=[]),                                    # no is_error flag at all
+    SimpleNamespace(content=[], isError=False),                     # the old attribute name is not the SDK's
+    {"content": "raw dict is not a result", "isError": False},      # a dict is not an SDK result
+], ids=["none", "no-content", "content-str", "bad-item", "bad-is-error", "no-is-error", "old-isError-name",
+        "dict-result"])
 def test_h2_malformed_responses_are_unknown_not_success(monkeypatch, tmp_sessions, result):
     async def malformed(name, arguments):
         return result
@@ -140,7 +151,7 @@ def test_h2_malformed_responses_are_unknown_not_success(monkeypatch, tmp_session
 
 def test_h2_valid_empty_content_is_a_success(monkeypatch, tmp_sessions):
     async def empty(name, arguments):
-        return SimpleNamespace(content=[], isError=False)
+        return CallToolResult(content=[], is_error=False)
 
     _, tool_msg, record, _ = mcp_run(monkeypatch, tmp_sessions, empty)
 
@@ -151,7 +162,7 @@ def test_h2_valid_empty_content_is_a_success(monkeypatch, tmp_sessions):
 
 def test_h2_non_text_content_is_represented_not_dropped(monkeypatch, tmp_sessions):
     async def image(name, arguments):
-        return SimpleNamespace(content=[SimpleNamespace(type="image")], isError=False)
+        return CallToolResult(content=[ImageContent(type="image", data="AAAA", mime_type="image/png")], is_error=False)
 
     _, tool_msg, record, _ = mcp_run(monkeypatch, tmp_sessions, image)
     assert envelope_of(tool_msg)["content"] == "[image content omitted]"
@@ -192,13 +203,14 @@ def test_h3_timeout_after_submission_is_unknown_and_not_retryable(monkeypatch, t
 
 def test_mc_explicit_remote_error_is_unknown_with_server_message(monkeypatch, tmp_sessions):
     async def remote_error(name, arguments):
-        return SimpleNamespace(content=[SimpleNamespace(type="text", text="quota exceeded")], isError=True)
+        return CallToolResult(content=[TextContent(type="text", text="quota exceeded")], is_error=True)
 
     _, tool_msg, record, _ = mcp_run(monkeypatch, tmp_sessions, remote_error)
     body = envelope_of(tool_msg)
 
     assert body["content"] == "quota exceeded"
-    assert body["errorCategory"] == "unknown_outcome" and body["isRetryable"] is False
+    assert body["isError"] is True
+    assert body["errorCategory"] == "mcp_error" and body["isRetryable"] is False
     assert record["status"] == "unknown", "a remote error does not prove that no side effect occurred"
 
 
@@ -219,7 +231,7 @@ def test_h3_cancellation_propagates_and_resume_does_not_redispatch(monkeypatch, 
         raise asyncio.CancelledError()
 
     transport = FakeTransport(cancelled)
-    client = MCPClientManager()
+    client = advertising(MCPClientManager(), "remote", "write")
     client.sessions = {"remote": transport}
     monkeypatch.setattr(config, "ALLOWED_MCP_TOOLS", {"mcp_remote_write"})
     with pytest.raises(asyncio.CancelledError):
@@ -231,7 +243,7 @@ def test_h3_cancellation_propagates_and_resume_does_not_redispatch(monkeypatch, 
     assert saved["execution"][0]["status"] == "running", "a cancelled call stays RUNNING on disk"
 
     resumed = FakeTransport(lambda n, a: None)
-    client2 = MCPClientManager()
+    client2 = advertising(MCPClientManager(), "remote", "write")
     client2.sessions = {"remote": resumed}
     run_agent(monkeypatch, [make_streamed_response(finish_reason="stop", content="ok")], mcp_client=client2,
               session_id="cancel", resume_messages=saved["messages"], resume_objective=saved["objective"],

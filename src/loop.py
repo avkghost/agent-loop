@@ -771,7 +771,7 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                         category = observation.get("errorCategory")
                         terminal_status = (
                             execution.ToolCallStatus.UNKNOWN
-                            if category in ("unknown_outcome", "transient")
+                            if category in ("unknown_outcome", "transient", envelope.CATEGORY_MCP_ERROR)
                             else execution.ToolCallStatus.FAILED
                         )
                         ctx.recorder.record_call(tool_id, tool_name, terminal_status.value)
