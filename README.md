@@ -263,7 +263,12 @@ python3 agent_loop.py resume <session-id> --criteria criteria.json   # optional:
 
 Paths must stay inside the working directory. A command must be allowed without approval, and may not use shell operators. A document with any problem is refused before a session is created or the model is contacted; every problem is listed. `job_state` cannot be declared in a file.
 
-The model cannot add or change these checks. When the model stops, the runtime runs the checks itself. Failed checks are returned to the model, up to `--verification-cycles` attempts. A run is reported as one of:
+The model cannot add or change the criteria, and the runtime runs the checks itself when the model stops. The checks are not a sandbox, though:
+
+- A `command_exit` check runs with the same allowlist and authorization as the `run_command` tool. An allowed command can change, move or delete workspace files, so the operator is responsible for what a check does.
+- A `command_exit` check is only independent of the model if the code it runs is not the model's. If the model writes the script a check runs during the run, the check verifies the model's own code.
+- `resume` checks the restored criteria against the current configuration before anything runs. A command that is no longer allowed is refused there, not run and reported as a failure.
+- Tool outcomes that were recorded as unknown are reported on every later verdict in the session. A later verified result does not resolve them. Failed checks are returned to the model, up to `--verification-cycles` attempts. A run is reported as one of:
 
 - `VERIFIED`: every criterion passed.
 - `FAILED VERIFICATION`: a required criterion did not pass within the budget.

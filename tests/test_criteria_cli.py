@@ -12,7 +12,7 @@ import subprocess
 
 import pytest
 
-from src import acceptance, cli, envelope, loop
+from src import acceptance, cli, config, envelope, loop
 from tests import scripted_provider
 from tests.conftest import make_streamed_response
 
@@ -423,3 +423,72 @@ def test_read_edit_diff_test_then_trusted_verification_through_the_cli(project, 
     assert "+    return 2" in results["c3"]
     assert "[Command completed with no visual output]" in results["c4"]
     assert (project / "app.py").read_text(encoding="utf-8") == "def value():\n    return 2\n"
+
+
+# --- review: restored criteria are judged by the current configuration; unknown outcomes stay visible ------------
+
+def test_resume_refuses_restored_checks_that_the_current_configuration_no_longer_allows(project, model, capsys,
+                                                                                       tmp_sessions, monkeypatch):
+    check = {"criterion_id": "tests_pass", "criterion_type": "command_exit", "expected": 0,
+             "parameters": {"command": "python3 -c \"print(1)\""}}
+    path = _write(project, "criteria.json", _doc(check))
+    model.script(_stop("Done."))
+    cli._main(["run", "first goal", "--criteria", path, "--verification-cycles", "1"])
+    capsys.readouterr()
+    sid = _only_session_id(tmp_sessions)
+    before = _session_file(tmp_sessions, sid)
+    monkeypatch.setattr(config, "ALLOWED_TOOLS", set())  # python3 is no longer allowed
+    requests_before = len(model.payloads)
+    cli._main(["resume", sid, "--verification-cycles", "1"])
+    out = capsys.readouterr().out
+    assert "not valid under the current configuration; nothing was run" in out
+    assert "tests_pass: verification command is not allowed" in out
+    assert len(model.payloads) == requests_before, "a refused resume must not reach the model"
+    assert _session_file(tmp_sessions, sid) == before
+
+
+def test_an_earlier_unknown_outcome_is_still_reported_when_the_resumed_run_verifies(project, model, capsys,
+                                                                                    tmp_sessions, monkeypatch):
+    from src import envelope, loop
+    original = loop.dispatch.dispatch_tool_async
+
+    async def unknown_dispatch(tool_name, tool_input, *args, **kwargs):
+        return envelope.error_unknown_outcome("transport lost; not retried")
+
+    monkeypatch.setattr(loop.dispatch, "dispatch_tool_async", unknown_dispatch)
+    path = _write(project, "criteria.json", _doc(FILE_HAS_TWO))
+    model.script(_call("u1", "write_file", {"path": "app.py", "content": "def value():\n    return 2\n"}), _stop("Done."))
+    cli._main(["run", "first", "--criteria", path, "--verification-cycles", "1"])
+    capsys.readouterr()
+    sid = _only_session_id(tmp_sessions)
+    monkeypatch.setattr(loop.dispatch, "dispatch_tool_async", original)
+    (project / "app.py").write_text("def value():\n    return 2\n", encoding="utf-8")
+    model.script(_stop("Carry on."))
+    cli._main(["resume", sid, "--verification-cycles", "1"])
+    out = capsys.readouterr().out
+    assert "VERIFIED — all 1 trusted criteria passed" in out, "the verdict itself is not redefined"
+    assert "1 tool outcome(s) in this session are recorded as unknown and were not retried" in out
+    assert "This verdict does not resolve them." in out
+
+
+def test_a_verification_command_runs_as_allowed_and_may_change_the_workspace(project, model, capsys, tmp_sessions):
+    """Documented trust boundary: verification uses the run_command allowlist, so an allowed command can change files.
+    The criteria file cannot be changed by the model; what the command does is the operator's responsibility."""
+    doomed = {"criterion_id": "removes_file", "criterion_type": "command_exit", "expected": 0,
+              "parameters": {"command": "rm app.py"}}
+    path = _write(project, "criteria.json", _doc(doomed))
+    model.script(_stop("Done."))
+    cli._main(["run", "goal", "--criteria", path, "--verification-cycles", "1"])
+    assert "VERIFIED" in capsys.readouterr().out
+    assert not (project / "app.py").exists()
+
+
+def test_a_check_script_written_by_the_model_is_run_as_it_is(project, model, capsys, tmp_sessions):
+    """Documented limit: a command_exit check is only independent of the model if the code it runs is not the model's.
+    Here the model writes the checker, and the criterion passes."""
+    check = {"criterion_id": "impl_passes", "criterion_type": "command_exit", "expected": 0,
+             "parameters": {"command": "python3 check.py"}}
+    path = _write(project, "criteria.json", _doc(check))
+    model.script(_call("w1", "write_file", {"path": "check.py", "content": "import sys\nsys.exit(0)\n"}), _stop("Done."))
+    cli._main(["run", "goal", "--criteria", path, "--verification-cycles", "1"])
+    assert "VERIFIED" in capsys.readouterr().out

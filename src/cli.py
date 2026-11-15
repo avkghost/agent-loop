@@ -178,6 +178,17 @@ def _verdict(outcome, criteria, latest):
     return status.upper(), outcome.reason
 
 
+def _unresolved_unknowns(session_id: str) -> int:
+    """Tool outcomes this session records as unknown. Nothing resolves them: they are never retried."""
+    try:
+        data = load_session(session_id)
+    except SessionLoadError:
+        return 0
+    if not data:
+        return 0
+    return sum(1 for item in data.get("execution", []) if isinstance(item, dict) and item.get("status") == "unknown")
+
+
 def _report_run(outcome, session_id: str, criteria) -> None:
     """Final status of a run that had (or lacked) trusted criteria, with each criterion's latest evidence."""
     if outcome is None:
@@ -186,6 +197,10 @@ def _report_run(outcome, session_id: str, criteria) -> None:
     label, detail = _verdict(outcome, criteria or [], latest)
     print(f"\n🧾 Run {outcome.run_id}: {label} — {detail}")
     print(f"   status {outcome.status}: {outcome.reason}")
+    unknown = _unresolved_unknowns(session_id)
+    if unknown:
+        print(f"   ⚠️  {unknown} tool outcome(s) in this session are recorded as unknown and were not retried. "
+              "This verdict does not resolve them.")
     if not criteria:
         return
     if latest is None:
@@ -344,6 +359,15 @@ def _main(args=None):
         persisted = []
         if session_data.get("criteria"):
             persisted = acceptance.contract_of(acceptance.validate_criteria(session_data["criteria"]))
+            # Restored checks are judged by the current configuration, not the one that was in force when they were saved
+            current = SessionAuthorization.from_config()
+            stale = [f"{item.criterion_id}: {reason}" for item in persisted
+                     for reason in [verification.declaration_problem(item, current)] if reason]
+            if stale:
+                print("❌ The session's trusted criteria are not valid under the current configuration; nothing was run:")
+                for problem in stale:
+                    print(f"   - {problem}")
+                return
         if parsed.criteria is not None:
             supplied = _criteria_from_path(parsed.criteria)
             if supplied is None:
