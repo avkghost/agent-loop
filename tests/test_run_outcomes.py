@@ -149,13 +149,13 @@ def test_user_permission_denial_is_blocked_and_stops_the_run(monkeypatch, tmp_se
 
     outcome, _, dispatched = _drive(monkeypatch, [
         make_streamed_response(finish_reason="tool_calls", tool_calls=[
-            {"id": "c_deny", "name": "grep", "arguments": json.dumps({"pattern": "x"})},
+            {"id": "c_deny", "name": "run_command", "arguments": json.dumps({"command": "grep x"})},
             {"id": "c_after", "name": "list_directory", "arguments": json.dumps({"path": "."})}]),
         _stop_reply("never reached"),
     ], dispatch_fn=gate, session_id="denied")
     assert outcome.run_status is S.BLOCKED
     assert "denied permission" in outcome.reason
-    assert [name for name, _ in dispatched] == ["grep"], "the calls after a denial are never dispatched"
+    assert [name for name, _ in dispatched] == ["run_command"], "the calls after a denial are never dispatched"
     journal = session.load_session("denied")["execution"]
     after = next(r for r in journal if r["tool_call_id"] == "c_after")
     assert after["status"] == "failed" and after["error_category"] == "permission"

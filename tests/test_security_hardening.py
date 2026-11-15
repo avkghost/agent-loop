@@ -29,7 +29,10 @@ class FakeMCP:
         return None
 
     def get_openai_tools(self):
-        return []
+        # The server advertises its one tool, as a real server does; an unadvertised name is not a known tool.
+        return [{"type": "function", "function": {"name": name, "description": name,
+                                                  "parameters": {"type": "object", "properties": {}}}}
+                for name in ("mcp_remote_write", "mcp_other")]
 
     async def call_tool(self, tool_name, tool_input):
         self.calls.append(tool_name)

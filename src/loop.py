@@ -11,7 +11,7 @@ from . import acceptance, instructions, terminal_input, verification
 from . import provider as provider_mod
 from . import runs
 from .authorization import SessionAuthorization
-from .tools import get_all_tools
+from .tools import get_all_tools, local_registry
 from .tools.mcp_client import MCPClientManager
 
 INTERRUPTED_RESULT = execution.INTERRUPTED_RESULT
@@ -471,6 +471,13 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
         tools = [t for t in all_tools if t.get('function', {}).get('name') in tool_allowlist_override]
     else:
         tools = all_tools
+    # The names offered to the model in every request of this run. A call naming a tool the runtime does not know at
+    # all is refused before its arguments are read: it is never dispatched and never reaches a permission gate.
+    # A tool the runtime knows but this run does not offer keeps the existing dispatch-time denial (scenario and
+    # skill allowlists), so those answers do not change.
+    advertised_names = frozenset(t.get('function', {}).get('name') for t in tools)
+    known_names = frozenset(local_registry().names()) | frozenset(
+        t.get('function', {}).get('name') for t in (mcp_client.get_openai_tools() if mcp_client else []))
 
     render.print_banner(user_goal, len(tools))
 
@@ -647,17 +654,26 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                 tool_id = tool_call.get("id")
                 tool_name = tool_call.get("function", {}).get("name")
 
-                # Parse tool arguments
+                # The name is checked before the arguments are read. A name the runtime does not know is reported as
+                # unknown, with its exact text, and its arguments are not interpreted at all.
                 parse_error = None
-                try:
-                    arguments_str = tool_call.get("function", {}).get("arguments", "{}")
-                    tool_input = json.loads(arguments_str)
-                except json.JSONDecodeError as e:
+                if tool_name and tool_name not in advertised_names and tool_name not in known_names:
                     tool_input = None
                     parse_error = envelope.error_validation(
-                        f"Error: Malformed tool arguments: {str(e)}",
+                        f"Error: Unknown tool {tool_name!r}: no such tool is available to this runtime. It was not run.",
                         fixable=False
                     )
+                else:
+                    # Parse tool arguments
+                    try:
+                        arguments_str = tool_call.get("function", {}).get("arguments", "{}")
+                        tool_input = json.loads(arguments_str)
+                    except json.JSONDecodeError as e:
+                        tool_input = None
+                        parse_error = envelope.error_validation(
+                            f"Error: Malformed tool arguments: {str(e)}",
+                            fixable=False
+                        )
                 if parse_error is None and not isinstance(tool_input, dict):
                     # Valid JSON that is not an object (null, [], 1, "x") cannot be tool arguments
                     tool_input = None
