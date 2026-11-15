@@ -81,13 +81,16 @@ def _assemble(system_msg: Dict[str, Any], objective: Optional[str],
     return [system_msg, {"role": "user", "content": "\n\n".join(parts)}] + tail
 
 
-def _estimate_tokens(messages: List[Dict[str, Any]]) -> int:
-    """Estimate context size with the same four-characters-per-token heuristic."""
+def estimate_tokens(messages: List[Dict[str, Any]]) -> int:
+    """The context size of a message list, with the four-characters-per-token heuristic over each whole message.
+
+    This is the one measure for the budget and for the decision to compact, so a request the loop sends is never
+    larger than the budget by the measure the budget uses."""
     return sum(len(json.dumps(message, ensure_ascii=False)) // 4 for message in messages)
 
 
 def _within_budget(messages: List[Dict[str, Any]]) -> bool:
-    return _estimate_tokens(messages) <= config.MAX_TOKENS
+    return estimate_tokens(messages) <= config.MAX_TOKENS
 
 
 def _budgeted_assembly(

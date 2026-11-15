@@ -158,6 +158,9 @@ def test_single_line_input_is_submitted_by_enter_and_editing_keys_work(term):
     t.expect("GOAL> ")
     t.key("fix the bugz")
     t.send(b"\x7f")
+    # Wait until the program has read and echoed the Backspace. Only then is Enter sent, so it arrives as its own read.
+    # Written back to back, the two bytes can share one read, and a newline in a multi-byte read is pasted text by design.
+    t.expect("\b \b")
     t.send("\r")
     assert _goal_value(t.expect("GOAL ")) == "fix the bug"
 
@@ -311,7 +314,7 @@ def test_the_workspace_is_the_working_directory_not_the_script_location(tmp_path
     (tmp_path / "project" / "outside.txt").write_text("outside", encoding="utf-8")
     monkeypatch.chdir(workspace)
 
-    assert loop.load_project_guidelines() == "nested guidelines"
+    assert "nested guidelines" in loop.load_project_guidelines().text
     assert read_file_safe("notes.txt")["content"] == "inside"
     refused = read_file_safe("../outside.txt")
     assert refused["isError"] is True and refused["errorCategory"] == "permission"
@@ -328,11 +331,12 @@ import os, sys
 sys.path.insert(0, {str(REPO)!r})
 from src import loop
 print('CWD ' + os.getcwd())
-print('GUIDE ' + str(loop.load_project_guidelines()))
+guide = loop.load_project_guidelines()
+print('GUIDE ' + (guide.text if guide else 'None'))
 """
     proc = subprocess.run([sys.executable, "-c", script], cwd=nested, capture_output=True, text=True, timeout=30,
                           env=dict(os.environ, PYTHONDONTWRITEBYTECODE="1"))
-    assert f"CWD {nested.resolve()}" in proc.stdout and "GUIDE nested" in proc.stdout
+    assert f"CWD {nested.resolve()}" in proc.stdout and "GUIDE --- AGENTS.md ---\nnested" in proc.stdout
 
 
 # --- the REPL itself: a pasted multi-line goal is not submitted, and Ctrl-C ends the session -----------------------------

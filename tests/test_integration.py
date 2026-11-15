@@ -6,6 +6,7 @@ Tool dispatch is patched, so no shell command or file write runs.
 
 from tests import scripted_provider  # noqa: E402
 import sys
+import copy
 import json
 import asyncio
 from unittest.mock import patch, MagicMock, AsyncMock
@@ -14,7 +15,7 @@ from pathlib import Path
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
-from src import loop, envelope, config, prompts
+from src import loop, envelope, config, prompts, compaction
 from src.tools.mcp_client import MCPClientManager
 from tests.conftest import protocol_violations
 
@@ -46,11 +47,16 @@ class FakeStream:
         return None
 
 
-def scripted_post(replies, summary_fails=True):
-    """requests.post replacement: model replies come from `replies`; summarizer calls (no tools) fail."""
+def scripted_post(replies, summary_fails=True, sent=None):
+    """requests.post replacement: model replies come from `replies`; summarizer calls (no tools) fail.
+
+    If `sent` is a list, a copy of each request body is appended at send time. The loop keeps mutating its message list,
+    so a reference recorded by the mock would show the final history for every request."""
     queue = list(replies)
 
     def post(url, json=None, timeout=None, stream=False):
+        if sent is not None and json is not None:
+            sent.append(copy.deepcopy(json))
         if json is not None and "tools" not in json:
             if summary_fails:
                 raise ConnectionError("summarizer unavailable in tests")
@@ -173,24 +179,56 @@ class TestIntegrationAgentLoop:
             )
             for i in range(5)
         ]
+        sent = []
         mock_post.side_effect = scripted_post(
-            tool_turns + [self.mock_lm_studio_response(finish_reason="stop", content="Completed")])
+            tool_turns + [self.mock_lm_studio_response(finish_reason="stop", content="Completed")], sent=sent)
+
+        # The budget is measured on the system message the run sends, workspace instructions included, so it is not
+        # tied to any particular instruction document. The headroom above that message is what fills up and forces
+        # compaction once several 1000-token results accumulate.
+        workspace = loop.load_project_guidelines()
+        system_message = {"role": "system", "content": loop.build_system_prompt(None, workspace)}
+        assert workspace is not None and workspace.text in system_message["content"], \
+            "the linked workspace instructions must be part of the budgeted system prompt"
+        budget = compaction.estimate_tokens([system_message]) + 2000
 
         original = (config.MAX_TOKENS, config.COMPACT_THRESHOLD)
-        system_tokens = len(prompts.SYSTEM_PROMPT) // 4
-        config.MAX_TOKENS = system_tokens + 2000  # forces compaction once several 1000-token results accumulate
+        config.MAX_TOKENS = budget
         config.COMPACT_THRESHOLD = 1.0
         try:
             run_agent("repeated task")
         finally:
             config.MAX_TOKENS, config.COMPACT_THRESHOLD = original
 
-        loop_requests = [c[1]["json"] for c in mock_post.call_args_list if "tools" in c[1]["json"]]
-        summary_attempts = [c for c in mock_post.call_args_list if "tools" not in c[1]["json"]]
+        loop_requests = [body for body in sent if "tools" in body]
+        summary_attempts = [body for body in sent if "tools" not in body]
         assert len(summary_attempts) >= 1, "compaction never attempted a summary"
         assert len(loop_requests) == 6, "the run must reach the final completion"
+
+        # The budget was built on the text that is actually sent, and every request carries it unchanged.
+        assert loop_requests[0]["messages"][0] == system_message, "the first request must send the budgeted system message"
+        assert all(body["messages"][0] == system_message for body in loop_requests), "compaction must keep the system message"
+
+        # Compaction fired: each round adds one tool result, so a request that does not gain exactly one means older
+        # rounds were removed before it was sent.
+        def tool_results(body):
+            return sum(1 for message in body["messages"] if message.get("role") == "tool")
+
+        compacted_at = [k for k in range(1, len(loop_requests))
+                        if tool_results(loop_requests[k]) < tool_results(loop_requests[k - 1]) + 1]
+        assert compacted_at, "compaction never removed history"
+        for k in compacted_at:
+            state = loop_requests[k]["messages"]
+            # The structured objective is kept, the newest round is kept, and no summary text appears (the summarizer
+            # failed in this test, so the fallback carries no summary).
+            assert state[1] == {"role": "user", "content": "Objective: repeated task"}, f"request {k}: objective lost"
+            assert state[-2]["role"] == "assistant" and state[-2]["content"] == f"Tool call {k - 1}", \
+                f"request {k}: the newest round was not kept"
+            assert not any(compaction.SUMMARY_MARKER in str(m.get("content") or "") for m in state)
+
         for index, body in enumerate(loop_requests):
             assert not protocol_violations(body["messages"]), f"request {index}: {protocol_violations(body['messages'])}"
+            assert compaction.estimate_tokens(body["messages"]) <= budget, f"request {index} exceeds the budget"
 
     @patch('tests.scripted_provider.POST')
     def test_lm_studio_error_handling(self, mock_post):

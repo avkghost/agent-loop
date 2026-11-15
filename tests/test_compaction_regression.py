@@ -59,7 +59,6 @@ def test_active_loop_calls_summarizing_helper(monkeypatch, run_loop, streamed_re
         return await original(*args, **kwargs)
 
     monkeypatch.setattr(compaction, "compact_messages", spy)
-    monkeypatch.setattr("src.loop.get_token_count", lambda text: 100)
 
     post, _ = run_loop(
         [streamed_response(finish_reason="stop", content="done")],

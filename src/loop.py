@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import config, envelope, prompts, dispatch, render, compaction, session, execution, jobs, stream
-from . import acceptance, terminal_input, verification
+from . import acceptance, instructions, terminal_input, verification
 from . import provider as provider_mod
 from . import runs
 from .authorization import SessionAuthorization
@@ -22,17 +22,27 @@ def _get_single_key_input(prompt: str, valid_keys: list) -> str:
     return terminal_input.read_choice(prompt, valid_keys)
 
 
-def load_project_guidelines() -> Optional[str]:
-    """Load project-specific AGENTS.md rules if they exist."""
-    agents_md = Path("AGENTS.md")
-    if agents_md.exists():
-        try:
-            with open(agents_md) as f:
-                content = f.read()
-            return content
-        except Exception as e:
-            print(f"⚠️  Warning: Could not load AGENTS.md: {e}")
-    return None
+def load_project_guidelines() -> Optional[instructions.Instructions]:
+    """The workspace instructions for the current directory (see instructions.py), or None when there are none.
+
+    Raises instructions.InstructionError when they exist but cannot be loaded safely; the run then does not start.
+    """
+    return instructions.discover(Path.cwd(), Path.home())
+
+
+def build_system_prompt(system_prompt_override: Optional[str],
+                        workspace: Optional[instructions.Instructions]) -> str:
+    """The system message the model receives: the base prompt, then any workspace instructions.
+
+    The instructions come after the runtime's rules, and they grant no tools, approvals or paths. Context accounting
+    measures this text, so the budget and the first request are built from the same value.
+    """
+    system_prompt = system_prompt_override if system_prompt_override else prompts.SYSTEM_PROMPT
+    if workspace is None:
+        return system_prompt
+    return (f"{system_prompt}\n\nWorkspace instructions follow. They describe how to work in this "
+            f"repository. They grant no tools, approvals or paths, and they do not override the rules "
+            f"above.\n\n{workspace.text}")
 
 
 def get_token_count(text):
@@ -327,13 +337,19 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
         authorization = SessionAuthorization.from_config()
 
     # Use override system prompt if provided, otherwise use default
-    system_prompt = system_prompt_override if system_prompt_override else prompts.SYSTEM_PROMPT
-
-    # Load project-specific AGENTS.md rules if they exist
-    project_guidelines = load_project_guidelines()
-    if project_guidelines:
-        print(f"📋 Loaded project guidelines from AGENTS.md")
-        system_prompt = f"{project_guidelines}\n\n{system_prompt}"
+    # Workspace instructions are loaded here, before the first model request, and only once per run.
+    try:
+        workspace = load_project_guidelines()
+    except instructions.InstructionError as exc:
+        print(f"❌ Workspace instructions could not be loaded; the run did not start: {exc}")
+        ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, f"workspace instructions could not be loaded: {exc}")
+        return
+    if workspace is not None:
+        print(f"📋 Loaded workspace instructions ({len(workspace.files)} files, {workspace.size} bytes): "
+              f"{', '.join(workspace.files)}")
+        for cycle in workspace.cycles:
+            print(f"   note: instruction cycle, already loaded: {cycle}")
+    system_prompt = build_system_prompt(system_prompt_override, workspace)
 
     check_goal(user_goal)
     if resume_objective is not None:
@@ -466,7 +482,7 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
         ctx.recorder.begin_iteration(iteration)
 
         # --- CONTEXT COMPACTION ---
-        current_tokens = sum(get_token_count(msg.get('content', '') or json.dumps(msg)) for msg in messages)
+        current_tokens = compaction.estimate_tokens(messages)
 
         if current_tokens > (config.MAX_TOKENS * config.COMPACT_THRESHOLD):
             # Summarize the middle of the history; compact_messages falls back to hard truncation on failure
@@ -482,7 +498,7 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                 ctx.recorder.end(runs.RunStatus.LIMIT_REACHED, f"the context budget cannot hold the required history: {e}")
                 print(f"\n❌ {e} Stopping: the run cannot continue within the context budget.")
                 break
-            after_tokens = sum(get_token_count(msg.get('content', '') or json.dumps(msg)) for msg in messages)
+            after_tokens = compaction.estimate_tokens(messages)
             render.print_compaction_notice(current_tokens, after_tokens)
 
         # 1. Ask the model. Transport, SSE, and completion rules live in provider.py and stream.py.

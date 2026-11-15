@@ -434,7 +434,7 @@ Define external tools and APIs:
 
 ### Project Rules (AGENTS.md)
 
-Create `AGENTS.md` in the project root to inject custom rules into all agent system prompts:
+Create `AGENTS.md` in the project root to inject custom rules into all agent system prompts. Example:
 
 ```markdown
 # Project Guidelines
@@ -449,6 +449,16 @@ Create `AGENTS.md` in the project root to inject custom rules into all agent sys
 - Always test changes locally first
 - Document breaking changes
 ```
+
+**How instructions are found and loaded**
+
+- **Discovery.** Before the first model request of a run, Agent Loop starts at the current workspace directory and walks toward its parents. The nearest `AGENTS.md` is used; parents are not merged. The search stops at the first directory that contains a `.git` entry (the project root, included). Without a `.git` entry it continues upward but never reaches or searches the home directory, which is excluded. Home-directory instructions are never loaded.
+- **Linking.** The entrypoint is read, and each Markdown link whose target is a local file ending in `.md` is followed, depth first, in order of appearance. Targets resolve relative to the file that contains the link, so nested references work. Links inside code spans and fenced code blocks are ignored, as are links to other file types and web URLs. A document is loaded once even if several links reach it; a cycle is reported and not loaded again.
+- **Nothing else is loaded.** Files in `agents/` and `skills/` are not loaded automatically. Only the entrypoint and what it links to.
+- **Nested workspaces.** Running from a subdirectory such as `project/tmp/test` inherits the nearest `AGENTS.md` above it. The execution directory does not change, and discovery writes nothing into the workspace.
+- **Boundaries.** Every linked file must resolve inside the directory that holds the entrypoint, after symbolic links are resolved. Absolute paths, remote (`http`, `https`, …) sources and symlinks that escape the root are rejected. Instructions are text for the model only: they grant no tools, approvals or filesystem paths, and an instruction file found in a parent does not widen what file tools may access beyond the working directory.
+- **Failure.** If a linked document is missing, unreadable, not UTF-8, or the loaded documents exceed 64 KiB in total, the run stops with `NEEDS_ATTENTION` before any model request. Nothing is truncated or partially loaded. The message names the file that caused the failure.
+- **Limitations.** Only inline Markdown links `[text](file.md)` are followed; there is no globbing, no include syntax and no automatic selection of documents. The byte limit counts raw bytes, not tokens, so a set near 64 KiB can use a large share of a small `MAX_TOKENS` budget.
 
 ## Advanced Usage
 
