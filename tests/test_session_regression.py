@@ -183,8 +183,8 @@ def test_cli_resume_reconstructs_and_continues_session(monkeypatch, capsys):
     cli.main(["resume", "sid"])
 
     assert resumed == [
-        (("goal",), {"session_id": "sid", "resume_messages": [], "resume_runs": [],
-                     "resume_evidence": [], "legacy_history": True})
+        (("goal",), {"session_id": "sid", "resume_messages": [], "criteria": [], "verification_cycles": 2,
+                     "resume_runs": [], "resume_evidence": [], "legacy_history": True})
     ]
     assert "Resuming session: goal" in capsys.readouterr().out
 

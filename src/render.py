@@ -169,9 +169,10 @@ def print_guardrail_stop() -> None:
     console.print("\n[yellow]⚠️  Guardrail: No progress detected. Stopping loop.[/yellow]")
 
 
-def print_completion() -> None:
-    """Print task completion message."""
-    console.print("\n[green bold]✅ Task completed successfully![/green bold]")
+def print_completion(note: str = "") -> None:
+    """Print task completion message. A note qualifies it, for example when nothing was verified."""
+    suffix = f" ({note})" if note else ""
+    console.print(f"\n[green bold]✅ Task completed successfully!{suffix}[/green bold]")
 
 
 def print_max_iterations_reached() -> None:

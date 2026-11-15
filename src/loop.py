@@ -620,7 +620,6 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                 ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION,
                                  "a tool outcome from this run is unknown, so verified completion is withheld",
                                  final_message=message.get("content") or "")
-                render.print_completion()
                 break
             if trusted:
                 ctx.verification_attempts += 1
@@ -652,7 +651,7 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                 ctx.recorder.end(runs.RunStatus.COMPLETED_UNVERIFIED,
                                  "the model stopped; no verification was performed because no trusted criteria were provided",
                                  final_message=message.get("content") or "")
-            render.print_completion()
+                render.print_completion(note="not verified")
             break
 
         # 3. Handle tool calls

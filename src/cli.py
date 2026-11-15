@@ -6,7 +6,8 @@ import asyncio
 import uuid
 from pathlib import Path
 
-from . import config, loop, jobs
+from . import acceptance, config, loop, jobs, verification
+from .authorization import SessionAuthorization
 from .runtime import AgentRuntime, SessionError, load_mcp_config
 from .config_loader import load_config, apply_config_overrides
 from .session import SESSION_FORMAT, SessionLoadError, SessionValidationError, list_sessions, load_session, validate_session_data, resume_history
@@ -15,6 +16,13 @@ from .tools.mcp_client import MCPClientManager
 from .agents_loader import load_agents, get_agent_description
 from .skills_loader import load_skills
 from .commands_loader import load_commands
+
+
+def _add_verification_options(parser) -> None:
+    parser.add_argument("--criteria", metavar="PATH",
+                        help="JSON document of trusted acceptance criteria; completion is verified against them")
+    parser.add_argument("--verification-cycles", type=int, default=2, metavar="N",
+                        help=f"verification cycles, 1 to {verification.MAX_VERIFICATION_CYCLES} (default 2)")
 
 
 def parse_args(args=None):
@@ -32,6 +40,7 @@ def parse_args(args=None):
     run_parser.add_argument("--allow", action="store_true", help="Allow all tools")
     run_parser.add_argument("--config", help="Config file path")
     run_parser.add_argument("--cache", action="store_true", help="Enable response caching")
+    _add_verification_options(run_parser)
 
     # repl: Interactive REPL mode
     repl_parser = subparsers.add_parser("repl", help="Interactive REPL mode")
@@ -44,6 +53,7 @@ def parse_args(args=None):
     resume_parser.add_argument("session_id", help="Session ID to resume")
     resume_parser.add_argument("--allow", action="store_true", help="Allow all tools")
     resume_parser.add_argument("--cache", action="store_true", help="Enable response caching")
+    _add_verification_options(resume_parser)
 
     # sessions: List saved sessions
     sessions_parser = subparsers.add_parser("sessions", help="List saved sessions")
@@ -93,6 +103,103 @@ def _report(outcome) -> None:
     print(f"\n🧾 Run {outcome.run_id}: {outcome.status} — {outcome.reason}")
 
 
+def _valid_cycles(cycles: int) -> bool:
+    if isinstance(cycles, int) and not isinstance(cycles, bool) and 1 <= cycles <= verification.MAX_VERIFICATION_CYCLES:
+        return True
+    print(f"❌ --verification-cycles must be an integer from 1 to {verification.MAX_VERIFICATION_CYCLES}")
+    return False
+
+
+def _criteria_from_path(path: str):
+    """Read, parse and check a criteria document before any session or model request exists. None means it was
+    refused, and the reasons have been printed."""
+    try:
+        text = Path(path).read_text(encoding="utf-8")
+    except UnicodeDecodeError:
+        print(f"❌ Criteria file {path} is not UTF-8 text; nothing was run.")
+        return None
+    except OSError as e:
+        print(f"❌ Cannot read criteria file {path}: {e.strerror or e}; nothing was run.")
+        return None
+    try:
+        criteria = acceptance.parse_criteria_document(text, max_criteria=verification.VerificationEngine().max_checks)
+    except acceptance.CriterionDocumentError as e:
+        print(f"❌ Invalid criteria file {path}; nothing was run:")
+        for problem in e.problems:
+            print(f"   - {problem}")
+        return None
+    authorization = SessionAuthorization.from_config()
+    problems = []
+    for criterion in criteria:
+        reason = verification.declaration_problem(criterion, authorization)
+        if reason:
+            problems.append(f"{criterion.criterion_id}: {reason}")
+    if problems:
+        print(f"❌ Criteria file {path} declares checks that could never run; nothing was run:")
+        for problem in problems:
+            print(f"   - {problem}")
+        return None
+    return criteria
+
+
+def _latest_results(session_id: str, run_id: str):
+    """The latest attempt per criterion for one run, read back from the saved session. None if it cannot be read."""
+    try:
+        data = load_session(session_id)
+    except SessionLoadError:
+        return None
+    if not data or "criteria" not in data or "verification_results" not in data:
+        return {}
+    try:
+        criteria = acceptance.validate_criteria(data["criteria"])
+        results = verification.validate_results(data["verification_results"], criteria)
+    except ValueError:
+        return None
+    return verification.VerificationEngine.current(item for item in results if item.run_id == run_id)
+
+
+def _verdict(outcome, criteria, latest):
+    status = outcome.status
+    if status == "completed_verified":
+        return "VERIFIED", f"all {len(criteria)} trusted criteria passed"
+    if status == "completed_unverified":
+        return ("COMPLETED WITHOUT TRUSTED CRITERIA",
+                "the model stopped and nothing was verified; pass --criteria to verify completion")
+    if status == "needs_attention":
+        if criteria and latest and not all(
+                latest.get(c.criterion_id) and latest[c.criterion_id].status == verification.VerificationStatus.PASSED.value
+                for c in criteria):
+            return "FAILED VERIFICATION", "required criteria did not pass within the verification budget"
+        return "NEEDS ATTENTION", outcome.reason
+    if status in ("blocked", "unknown", "provider_failed"):
+        return "AUTHORIZATION OR EXECUTION FAILURE", outcome.reason
+    if status in ("interrupted", "limit_reached"):
+        return "INTERRUPTED OR INCOMPLETE", outcome.reason
+    return status.upper(), outcome.reason
+
+
+def _report_run(outcome, session_id: str, criteria) -> None:
+    """Final status of a run that had (or lacked) trusted criteria, with each criterion's latest evidence."""
+    if outcome is None:
+        return
+    latest = _latest_results(session_id, outcome.run_id) if criteria else {}
+    label, detail = _verdict(outcome, criteria or [], latest)
+    print(f"\n🧾 Run {outcome.run_id}: {label} — {detail}")
+    print(f"   status {outcome.status}: {outcome.reason}")
+    if not criteria:
+        return
+    if latest is None:
+        print("   evidence: the verification results could not be read back from the session")
+        latest = {}
+    for criterion in criteria:
+        result = latest.get(criterion.criterion_id)
+        if result is None:
+            line = "not checked"
+        else:
+            line = f"{result.status} (attempt {result.attempt} of {result.budget}): {result.observation}"
+        print(f"   · {criterion.criterion_id} [{criterion.criterion_type}]: {line}")
+
+
 def _close_repl(runtime, repl_session) -> None:
     """Close the REPL session and shut the runtime down. A refusal or failure is reported, not raised."""
     try:
@@ -139,8 +246,15 @@ def _main(args=None):
             print("Usage: python3 agent_loop.py run '<goal>'")
             return
         goal = parsed.goal
+        if not _valid_cycles(parsed.verification_cycles):
+            return
+        criteria = _criteria_from_path(parsed.criteria) if parsed.criteria is not None else []
+        if criteria is None:
+            return
         session_id = str(uuid.uuid4())
-        _report(loop.agent_loop(goal, session_id=session_id))
+        outcome = loop.agent_loop(goal, session_id=session_id, criteria=criteria,
+                                  verification_cycles=parsed.verification_cycles)
+        _report_run(outcome, session_id, criteria)
 
     elif command == "repl":
         # One stable session for every goal in this REPL; it closes (and stops its jobs) on exit
@@ -223,13 +337,47 @@ def _main(args=None):
             if isinstance(legacy_objective, str):
                 resume_kwargs["resume_objective"] = legacy_objective
 
+        if not _valid_cycles(parsed.verification_cycles):
+            return
+        # The trusted contract persisted with the session. A resumed run is checked against it, never against a
+        # silently empty set: supplying different criteria is refused, and dropping them is not possible.
+        persisted = []
+        if session_data.get("criteria"):
+            persisted = acceptance.contract_of(acceptance.validate_criteria(session_data["criteria"]))
+        if parsed.criteria is not None:
+            supplied = _criteria_from_path(parsed.criteria)
+            if supplied is None:
+                return
+            if not persisted:
+                print("❌ This session was started without trusted criteria, so criteria cannot be added on resume. "
+                      "Start a new run with --criteria instead; nothing was run.")
+                return
+            if not acceptance.same_contract(supplied, persisted):
+                print(f"❌ The criteria in {parsed.criteria} differ from the session's trusted criteria "
+                      f"(contract {acceptance.contract_fingerprint(persisted)}); nothing was run.")
+                return
+        run_criteria = []
+        if persisted:
+            existing = {item["criterion_id"] for item in session_data["criteria"]}
+            generation = len({item["run_id"] for item in session_data["criteria"]})
+            try:
+                run_criteria = acceptance.resumed_copies(persisted, existing, generation)
+            except acceptance.CriterionDocumentError as e:
+                print(f"❌ {e}; nothing was run.")
+                return
+            print(f"🔒 Trusted criteria carried over from the session: {len(run_criteria)} check(s), "
+                  f"contract {acceptance.contract_fingerprint(persisted)}")
+
         print(f"📂 Resuming session: {session_data.get('goal', 'Unknown goal')}")
-        _report(loop.agent_loop(
+        outcome = loop.agent_loop(
             session_data.get("goal", ""),
             session_id=parsed.session_id,
             resume_messages=messages,
+            criteria=run_criteria,
+            verification_cycles=parsed.verification_cycles,
             **resume_kwargs,
-        ))
+        )
+        _report_run(outcome, parsed.session_id, run_criteria)
 
     elif command == "sessions":
         sessions = list_sessions()

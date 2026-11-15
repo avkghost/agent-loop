@@ -244,6 +244,28 @@ python3 agent_loop.py resume <session-id> # Resume a session
 ```
 `resume` restores the saved conversation. A tool call that was in progress when the process stopped is answered as interrupted and is not run again. See "Tool Failures, Interruptions, and Limits" under Token Management.
 
+#### 10. **Verify a task against trusted criteria**
+```bash
+python3 agent_loop.py run "Make value() return 2" --criteria criteria.json --verification-cycles 2
+python3 agent_loop.py resume <session-id> --criteria criteria.json   # optional: checks the same contract
+```
+`criteria.json` is a JSON object whose only key is `criteria`: a non-empty list of checks in the existing criterion types. Each check has `criterion_id`, `criterion_type`, `expected` and `parameters`; `description` is optional.
+
+- `file_exists`: `path`, optional `type` (`file` or `directory`); `expected` is `true` or `false`.
+- `file_content`: `path`, `contains` (non-empty text); `expected` is `true`.
+- `command_exit`: `command`, optional `timeout_seconds` (1 to 600); `expected` is the exit code.
+
+Paths must stay inside the working directory. A command must be allowed without approval, and may not use shell operators. A document with any problem is refused before a session is created or the model is contacted; every problem is listed. `job_state` cannot be declared in a file.
+
+The model cannot add or change these checks. When the model stops, the runtime runs the checks itself. Failed checks are returned to the model, up to `--verification-cycles` attempts. A run is reported as one of:
+
+- `VERIFIED`: every criterion passed.
+- `FAILED VERIFICATION`: a required criterion did not pass within the budget.
+- `COMPLETED WITHOUT TRUSTED CRITERIA`: no criteria were given, so nothing was verified.
+- `INTERRUPTED OR INCOMPLETE`, `AUTHORIZATION OR EXECUTION FAILURE`, or `NEEDS ATTENTION` (for example, an unresolved tool outcome, which withholds verified completion).
+
+Each criterion's latest result and evidence are printed. On `resume`, the trusted criteria saved with the session are carried over to the new run. If `--criteria` is also given, it must describe the same checks; otherwise nothing runs. Criteria cannot be added to a session that started without them.
+
 ### Command-Line Options
 
 | Option | Commands | Description |
@@ -251,6 +273,8 @@ python3 agent_loop.py resume <session-id> # Resume a session
 | `--allow` | `run`, `repl`, `agent`, `skill` | Allow all tools (skip permission prompts) |
 | `--config FILE` | `run`, `repl`, `agent`, `skill`, `tools`, `config` | Load custom config file |
 | `--cache` | `run`, `repl`, `agent`, `skill` | Enable response caching |
+| `--criteria PATH` | `run`, `resume` | Trusted acceptance criteria (see Verify a task) |
+| `--verification-cycles N` | `run`, `resume` | Verification attempts, 1 to 10 (default 2) |
 
 ### Examples
 

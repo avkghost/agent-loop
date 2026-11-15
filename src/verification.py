@@ -11,6 +11,7 @@ from pathlib import Path
 from typing import Any, Awaitable, Callable, Dict, Iterable, List, Optional
 
 from .acceptance import AcceptanceCriterion, CriterionType
+from .tools import shell
 from .tools.files import _contained_target
 
 
@@ -71,6 +72,25 @@ class VerificationResult:
         if not isinstance(data, dict) or set(data) != required:
             raise ValueError("verification result has missing or unexpected fields")
         return cls(**{key: data[key] for key in required})
+
+
+def declaration_problem(criterion: AcceptanceCriterion, authorization: Any) -> Optional[str]:
+    """Why a declared check could never run under the verifier's own rules, or None.
+
+    Paths follow the workspace containment rule used at check time. Commands follow the authorization a verification run
+    has: validated only, never executed here, and refused if they would need approval, because verification never prompts.
+    """
+    params = criterion.parameters
+    if criterion.criterion_type in (CriterionType.FILE_EXISTS.value, CriterionType.FILE_CONTENT.value):
+        _, error = _contained_target(params.get("path", ""))
+        if error:
+            return "path is outside the working directory"
+    if criterion.criterion_type == CriterionType.COMMAND_EXIT.value:
+        early, _, _ = shell.validate_command(params.get("command", ""), authorization)
+        if early is not None:
+            reason = early.get("content") or "it needs approval, and verification never prompts"
+            return f"verification command is not allowed: {reason}"
+    return None
 
 
 def _now() -> str:
