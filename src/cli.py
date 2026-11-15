@@ -6,7 +6,7 @@ import asyncio
 import uuid
 from pathlib import Path
 
-from . import acceptance, config, loop, jobs, verification
+from . import acceptance, config, loop, jobs, terminal_input, verification
 from .authorization import SessionAuthorization
 from .runtime import AgentRuntime, SessionError, load_mcp_config
 from .config_loader import load_config, apply_config_overrides
@@ -267,7 +267,7 @@ def _main(args=None):
             print(f"🧭 Session: {repl_session.session_id}")
             while True:
                 try:
-                    goal = input("\n🎯 Enter goal (or 'exit'/'quit' to exit): ").strip()
+                    goal = terminal_input.read_goal("\n🎯 Enter goal (or 'exit'/'quit' to exit): ").strip()
                     if goal.lower() in ("exit", "quit"):
                         break
                     if not goal:

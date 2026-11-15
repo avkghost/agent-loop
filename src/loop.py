@@ -7,7 +7,7 @@ from pathlib import Path
 from typing import Any, Optional
 
 from . import config, envelope, prompts, dispatch, render, compaction, session, execution, jobs, stream
-from . import acceptance, verification
+from . import acceptance, terminal_input, verification
 from . import provider as provider_mod
 from . import runs
 from .authorization import SessionAuthorization
@@ -18,39 +18,8 @@ INTERRUPTED_RESULT = execution.INTERRUPTED_RESULT
 
 
 def _get_single_key_input(prompt: str, valid_keys: list) -> str:
-    """Get single key input without requiring Enter (Unix/Linux/macOS)."""
-    import sys
-    import termios
-    import tty
-
-    print(prompt, end='', flush=True)
-
-    try:
-        # Save terminal settings
-        fd = sys.stdin.fileno()
-        old_settings = termios.tcgetattr(fd)
-        try:
-            # Set terminal to raw mode (no buffering, no echo)
-            tty.setraw(fd)
-            # Read one character
-            ch = sys.stdin.read(1)
-
-            # Validate input
-            if ch in valid_keys:
-                print(ch)  # Echo the character
-                return ch
-            elif ch == '\x03':  # Ctrl+C
-                print("\n❌ Interrupted - Denying.")
-                return "3"
-            else:
-                print()  # New line
-                return _get_single_key_input(prompt, valid_keys)  # Retry
-        finally:
-            # Restore terminal settings
-            termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-    except (ImportError, termios.error, OSError):
-        # Fallback for Windows or non-TTY environments
-        return input(prompt).strip() or "3"
+    """A permission answer. Only a deliberate single key counts; pasted or leftover input does not (see terminal_input)."""
+    return terminal_input.read_choice(prompt, valid_keys)
 
 
 def load_project_guidelines() -> Optional[str]:

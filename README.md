@@ -188,6 +188,12 @@ Then enter goals interactively:
 
 The REPL keeps **one session** for every goal you enter. Conversation history, run records, and session-local approvals carry from one goal to the next, and each goal is saved as its own run. Background jobs started by one goal stay running after that goal finishes, so a later goal can check, collect, or stop them. Ctrl-C cancels the goal that is running and records it as interrupted; the session stays open. Leaving the REPL closes the session, which stops its background jobs, closes its MCP connections, and then shuts the runtime down.
 
+**Entering multi-line text.** A goal may span several lines. Paste it with bracketed paste and press Enter once to submit: a paste is taken whole, its newlines included, and it never submits by itself. Typed text is edited with Backspace; Enter submits; Ctrl-C cancels the prompt; Ctrl-D on an empty prompt ends the REPL.
+
+*Requirements and limits.* Multi-line paste depends on the terminal: it must support bracketed paste mode (check your terminal's documentation; it is not universal). Terminals that do not support it deliver a paste as ordinary typing. Then each newline is an Enter: a paste that arrives in one read is still kept whole, but a paste delivered line by line submits at its first newline, and the rest is typed into the next prompt. Paste into such a terminal line by line is not recommended. Terminal.app and Midnight Commander have not been verified for this change.
+
+**Permission prompts.** A permission prompt accepts only one deliberate key (`1`, `2`, or `3`). Text pasted or typed as a burst, and any key that is not one of those, is ignored and the prompt keeps waiting. Ctrl-C denies. On a terminal without bracketed paste, a single pasted `1`, `2`, or `3` delivered as one byte cannot be told apart from a keypress; paste into such a terminal while a permission prompt is open is not safe.
+
 #### 3. **Run with a named agent**
 Use a specific agent persona with predefined system prompt and tool access:
 ```bash
