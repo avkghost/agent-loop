@@ -3,6 +3,7 @@
 import json
 from rich.console import Console
 from rich.markdown import Markdown
+from rich.markup import escape
 from rich.panel import Panel
 from rich.rule import Rule
 from rich.text import Text
@@ -35,7 +36,7 @@ def _truncate_value(value, limit: int = 200) -> str:
 
 def print_banner(goal: str, tool_count: int) -> None:
     """Print startup banner with goal and available tools."""
-    console.print(f"\n🚀 Starting agentic loop for goal: '[bold]{goal}[/bold]'\n")
+    console.print(f"\n🚀 Starting agentic loop for goal: '[bold]{escape(goal)}[/bold]'\n")
     console.print(Rule(style="cyan"))
     console.print(f"📋 Available tools: {tool_count}")
 
@@ -53,7 +54,7 @@ def print_compaction_notice(before: int, after: int) -> None:
 
 def print_llm_error(msg: str) -> None:
     """Print LM Studio communication error."""
-    console.print(f"\n[red]❌ Failed to communicate with LM Studio: {msg}[/red]")
+    console.print(f"\n[red]❌ Failed to communicate with LM Studio: {escape(msg)}[/red]")
 
 
 def print_retry_notice(attempt: int, max_attempts: int, wait_time: float) -> None:
@@ -82,7 +83,8 @@ def print_assistant_message(content: str) -> None:
 
 def print_tool_call(name: str, args: dict) -> None:
     """Print tool call with arguments, truncating long values for display."""
-    console.print(f"\n[bold]🛠️  Calling tool:[/bold] [cyan]{name}[/cyan]")
+    # Tool names and arguments come from the model: escaped, so bracketed text is shown rather than read as markup
+    console.print(f"\n[bold]🛠️  Calling tool:[/bold] [cyan]{escape(name)}[/cyan]")
 
     if args:
         args_display = {}
@@ -92,7 +94,7 @@ def print_tool_call(name: str, args: dict) -> None:
                 args_display[key] = _truncate_middle(value, limit=200)
             else:
                 args_display[key] = value
-        console.print(f"   [dim]Arguments:[/dim] {args_display}")
+        console.print(f"   [dim]Arguments:[/dim] {escape(f'{args_display}')}")
 
 
 def print_observation(observation_str: str) -> None:
@@ -123,15 +125,19 @@ def print_observation(observation_str: str) -> None:
                     parts.append(f"errorCategory: {error_category}")
                 if is_retryable is not None:
                     parts.append(f"isRetryable: {is_retryable}")
-                metadata = f"\n[dim]({', '.join(parts)})[/dim]"
+                metadata = f"({', '.join(parts)})"
 
-            # Style based on error status
+            # Style based on error status. The content is Text, never markup: tool output is data, and bracketed
+            # text in it (Rust attributes, links, tags) must show exactly as read.
             border_style = "red" if is_error else "green"
             icon = "❌" if is_error else "✅"
 
+            body = Text(display_content)
+            if metadata:
+                body.append("\n" + metadata, style="dim")
             console.print()
             panel = Panel(
-                display_content + metadata,
+                body,
                 title=f"{icon} Observation",
                 border_style=border_style,
                 expand=False
@@ -148,7 +154,7 @@ def print_observation(observation_str: str) -> None:
         display_str = observation_str
 
     console.print()
-    panel = Panel(display_str, title="✅ Observation", border_style="green", expand=False)
+    panel = Panel(Text(display_str), title="✅ Observation", border_style="green", expand=False)
     console.print(panel)
 
 
@@ -156,12 +162,12 @@ def print_permission_request(kind: str, identifier: str) -> None:
     """Print permission request prompt."""
     console.print("\n" + "="*50)
     console.print("[bold yellow]⚠️  PERMISSION REQUESTED[/bold yellow]")
-    console.print(f"[bold]{kind.upper()}:[/bold] {identifier}")
+    console.print(f"[bold]{escape(kind.upper())}:[/bold] {escape(identifier)}")
 
 
 def print_permission_result(label: str) -> None:
     """Print permission result."""
-    console.print(f"[green]{label}[/green]")
+    console.print(f"[green]{escape(label)}[/green]")
 
 
 def print_guardrail_stop() -> None:
@@ -171,7 +177,7 @@ def print_guardrail_stop() -> None:
 
 def print_completion(note: str = "") -> None:
     """Print task completion message. A note qualifies it, for example when nothing was verified."""
-    suffix = f" ({note})" if note else ""
+    suffix = f" ({escape(note)})" if note else ""
     console.print(f"\n[green bold]✅ Task completed successfully!{suffix}[/green bold]")
 
 
@@ -182,7 +188,7 @@ def print_max_iterations_reached() -> None:
 
 def print_finish_reason_warning(finish_reason: str) -> None:
     """Print warning for unexpected finish reason."""
-    console.print(f"\n[yellow]⚠️  Loop ended with finish_reason: {finish_reason}[/yellow]")
+    console.print(f"\n[yellow]⚠️  Loop ended with finish_reason: {escape(finish_reason)}[/yellow]")
 
 
 def print_usage(usage) -> None:
