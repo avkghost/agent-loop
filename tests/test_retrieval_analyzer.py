@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-from tools.analyze_retrieval import AnalysisError, analyze_session
+from tools.analyze_retrieval import AnalysisError, _human, analyze_session
 
 
 def _session(tmp_path: Path, *, runs, execution, messages=None):
@@ -88,6 +88,7 @@ def test_multiple_runs_select_only_records_owned_by_requested_run(tmp_path):
     assert report["unowned_execution_count"] == 0
     assert report["foreign_execution_count"] == 1
     assert report["search_calls"][0]["tool_call_id"] == "owned"
+    assert "Execution ownership: selected=1; owned=1; unowned=0; foreign=1" in _human(report)
 
 
 def test_multiple_runs_with_legacy_execution_record_fail_closed(tmp_path):

@@ -320,6 +320,9 @@ def _human(report: dict[str, Any]) -> str:
     lines = [
         f"Run: {report['run_id']}",
         f"Session: {report['session_id']}",
+        f"Execution ownership: selected={report['selected_execution_count']}; "
+        f"owned={report['owned_execution_count']}; unowned={report['unowned_execution_count']}; "
+        f"foreign={report['foreign_execution_count']}",
         f"Search calls: {report['search_count']}",
         f"Tool calls: {report['tool_call_count']} ({report['tool_counts']})",
         f"Output: {report['total_persisted_outcome_bytes']} persisted-outcome bytes; "
