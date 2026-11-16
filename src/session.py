@@ -203,6 +203,15 @@ def _ensure_dir():
     SESSIONS_DIR.mkdir(parents=True, exist_ok=True)
 
 
+def _fsync_directory(directory: Path) -> None:
+    """Persist directory metadata after an atomic rename."""
+    directory_fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(directory_fd)
+    finally:
+        os.close(directory_fd)
+
+
 def _is_error_envelope(content: Any) -> bool:
     """True when a stored tool result is a serialized error envelope (isError: true)."""
     if not isinstance(content, str):
@@ -339,6 +348,7 @@ def save_session(session_id: str, goal: str, messages: List[Dict[str, Any]],
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp_path, session_path)
+        _fsync_directory(SESSIONS_DIR)
     except BaseException:
         try:
             tmp_path.unlink()

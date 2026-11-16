@@ -7,7 +7,7 @@ import json
 from contextlib import AsyncExitStack
 from typing import Dict, Any, Optional
 
-from .. import envelope
+from .. import config, envelope
 
 _MISSING = object()
 
@@ -192,11 +192,12 @@ class MCPClientManager:
         try:
             result = await asyncio.wait_for(
                 session.call_tool(tool_name, arguments),
-                timeout=30.0
+                timeout=config.MCP_TOOL_TIMEOUT
             )
         except asyncio.TimeoutError:
             return envelope.error_unknown_outcome(
-                f"MCP tool {prefixed_name} timed out after 30 seconds. It may have executed; it was not retried.",
+                f"MCP tool {prefixed_name} timed out after {config.MCP_TOOL_TIMEOUT} seconds. "
+                "It may have executed; it was not retried.",
                 description="The call was submitted and no response arrived in time.",
             )
         except Exception as e:  # CancelledError and other BaseExceptions propagate untouched

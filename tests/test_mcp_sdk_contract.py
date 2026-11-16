@@ -8,6 +8,7 @@ import asyncio
 import copy
 import importlib.metadata
 import json
+import sqlite3
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -15,7 +16,7 @@ from types import SimpleNamespace
 import pytest
 from mcp.types import CallToolResult, ImageContent, TextContent, Tool
 
-from src import envelope, loop, runs, session
+from src import config, envelope, loop, runs, session
 from src.acceptance import AcceptanceCriterion
 from src.authorization import SessionAuthorization
 from src.tools.mcp_client import MCPClientManager, MCPContractError, offered_tools, tool_parameters
@@ -200,6 +201,19 @@ def test_a_tool_error_keeps_the_server_message_and_is_not_retried(stub_client):
     assert "remote refused: quota" in body["content"]
 
 
+def test_real_stdio_timeout_after_commit_is_unknown_and_not_retried(stub_client, tmp_path, monkeypatch):
+    effect_path = tmp_path / "effect.txt"
+    monkeypatch.setattr(config, "MCP_TOOL_TIMEOUT", 0.05)
+
+    body = _call(stub_client, "hang_after_commit", {"effect_path": str(effect_path)})
+
+    assert body["isError"] is True
+    assert body["errorCategory"] == "unknown_outcome"
+    assert body["isRetryable"] is False
+    assert "timed out after 0.05 seconds" in body["content"]
+    assert effect_path.read_text(encoding="utf-8") == "committed"
+
+
 # --- the run: offered schema, and accurate journal and evidence outcomes -------------------------------------------
 
 @pytest.fixture
@@ -267,12 +281,52 @@ class _SpySession:
         return CallToolResult(content=[TextContent(type="text", text="ran")], is_error=False)
 
 
+class _EffectThenFailureSession:
+    """A disposable remote action that commits once, then loses its response."""
+
+    def __init__(self, effect_db, failure):
+        self.effect_db = effect_db
+        self.failure = failure
+        self.calls = 0
+
+    async def call_tool(self, name, arguments):
+        self.calls += 1
+        with sqlite3.connect(self.effect_db) as connection:
+            connection.execute("CREATE TABLE IF NOT EXISTS effects (key TEXT PRIMARY KEY)")
+            connection.execute("INSERT OR IGNORE INTO effects(key) VALUES (?)", ("submitted-once",))
+        if self.failure == "timeout":
+            raise asyncio.TimeoutError()
+        raise ConnectionResetError("connection lost after submission")
+
+
 def _advertising_spy(*tools):
     client = MCPClientManager()
     spy = _SpySession()
     client.sessions = {"srv": spy}
     client.tools_cache = {"srv": offered_tools(list(tools))}
     return client, spy
+
+
+def _effect_failure_client(effect_db, failure):
+    client = MCPClientManager()
+    remote = _EffectThenFailureSession(effect_db, failure)
+    client.sessions = {"srv": remote}
+    client.tools_cache = {"srv": [_tool("mutate", {"type": "object", "properties": {}})]}
+    return client, remote
+
+
+@pytest.mark.parametrize("failure", ["timeout", "disconnect"])
+def test_submitted_effect_is_unknown_and_never_retried(tmp_path, failure):
+    client, remote = _effect_failure_client(tmp_path / "effects.sqlite", failure)
+
+    body = asyncio.run(client.call_tool("mcp_srv_mutate", {}))
+
+    assert body["isError"] is True
+    assert body["errorCategory"] == "unknown_outcome"
+    assert body["isRetryable"] is False
+    assert remote.calls == 1
+    with sqlite3.connect(tmp_path / "effects.sqlite") as connection:
+        assert connection.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 1
 
 
 def test_an_excluded_tool_is_rejected_before_the_session_while_advertised_tools_still_run():

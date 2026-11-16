@@ -364,6 +364,66 @@ def test_compaction_does_not_change_execution_records(monkeypatch):
     assert not protocol_violations(compacted)
 
 
+def test_failed_compaction_keeps_unresolved_call_unknown_on_resume(
+    monkeypatch, run_loop, streamed_response, tmp_sessions
+):
+    messages = [
+        {"role": "system", "content": "SYS"},
+        {"role": "user", "content": "Objective: recover safely"},
+        {"role": "assistant", "content": "calling", "tool_calls": [{
+            "id": "call_unresolved", "type": "function",
+            "function": {"name": "run_command", "arguments": "{\"command\":\"unsafe\"}"},
+        }]},
+        {"role": "assistant", "content": "older context"},
+        {"role": "user", "content": "more context"},
+        {"role": "assistant", "content": "latest context"},
+    ]
+    execution_records = [{
+        "tool_call_id": "call_unresolved", "tool_name": "run_command",
+        "arguments": {"command": "unsafe"}, "status": "running",
+        "outcome": None, "error_category": None,
+    }]
+
+    original_compact = compaction.compact_messages
+
+    class FailingSummaryProvider:
+        async def complete(self, *args, **kwargs):
+            raise RuntimeError("summary service unavailable")
+
+    async def fail_summary(messages, provider=None, state=None):
+        return await original_compact(messages, FailingSummaryProvider(), state=state)
+
+    monkeypatch.setattr(compaction, "compact_messages", fail_summary)
+    post, dispatched = run_loop(
+        [streamed_response(finish_reason="stop", content="continued safely")],
+        dispatch_fn=lambda *args, **kwargs: pytest.fail("an unresolved call was redispatched"),
+        session_id="compaction-recovery",
+        resume_messages=messages,
+        resume_objective="Objective: recover safely",
+        resume_execution=execution_records,
+        MAX_TOKENS=200,
+        COMPACT_THRESHOLD=0.5,
+    )
+
+    saved = session.load_session("compaction-recovery")
+    record = saved["execution"][0]
+    assert dispatched == []
+    assert record["status"] == "unknown"
+    assert record["error_category"] == "unknown_outcome"
+    assert any(
+        message.get("role") == "tool"
+        and message.get("tool_call_id") == "call_unresolved"
+        and "not re-executed" in message.get("content", "")
+        for message in saved["messages"]
+    )
+    assert any(
+        message.get("role") == "tool"
+        and message.get("tool_call_id") == "call_unresolved"
+        and "not re-executed" in message.get("content", "")
+        for message in post.payloads[0]["messages"]
+    )
+
+
 def test_resume_restores_completed_result_without_redispatch(run_loop, streamed_response):
     messages = [
         {"role": "system", "content": "SYS"},

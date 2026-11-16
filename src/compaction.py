@@ -37,7 +37,21 @@ def _recent_tail_start(messages: List[Dict[str, Any]], keep: int = 4) -> int:
     start = max(len(messages) - keep, 1)
     while start < len(messages) and messages[start].get("role") == "tool":
         start += 1
-    return start
+    while True:
+        retained_tool_ids = {
+            message.get("tool_call_id")
+            for message in messages[start:]
+            if message.get("role") == "tool"
+        }
+        declaration_starts = [
+            index
+            for index, message in enumerate(messages[:start])
+            if message.get("role") == "assistant"
+            and any(call.get("id") in retained_tool_ids for call in message.get("tool_calls", []))
+        ]
+        if not declaration_starts:
+            return start
+        start = min(declaration_starts)
 
 
 def _recent_tail(messages: List[Dict[str, Any]], keep: int = 4) -> List[Dict[str, Any]]:

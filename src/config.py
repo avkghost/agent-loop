@@ -5,6 +5,7 @@ LM_STUDIO_URL = "http://localhost:1234/v1/chat/completions"
 MODEL_NAME = "zai-org/glm-4.7-flash"
 LM_STUDIO_TIMEOUT = 60  # Request timeout in seconds (LM Studio can be slow)
 LM_STUDIO_CONNECT_TIMEOUT = 5  # Connection timeout
+MCP_TOOL_TIMEOUT = 30  # Maximum time to await an MCP tool response
 
 # Retry policy for slow/failing LM Studio
 LM_STUDIO_RETRIES = 2  # Number of retries on timeout

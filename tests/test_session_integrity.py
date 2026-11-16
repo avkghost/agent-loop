@@ -6,6 +6,9 @@ file is left byte-for-byte unchanged. Every successful save must load.
 
 import asyncio
 import json
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -15,6 +18,7 @@ from src.tools.mcp_client import MCPClientManager
 from tests import scripted_provider
 from tests.conftest import make_streamed_response
 
+REPO = Path(__file__).resolve().parents[1]
 SYS = {"role": "system", "content": "sys"}
 DECLARED = {"id": "call_ok", "type": "function", "function": {"name": "list_directory", "arguments": "{}"}}
 
@@ -177,6 +181,95 @@ def test_failed_replace_keeps_the_previous_valid_file(tmp_sessions, monkeypatch)
                              execution=_journal())
     assert _path().read_bytes() == before
     assert not list(session.SESSIONS_DIR.glob("integrity.json.tmp"))
+
+
+def test_successful_replace_fsyncs_the_sessions_directory(tmp_sessions, monkeypatch):
+    fsynced = []
+    real_fsync = session.os.fsync
+
+    def record_fsync(fd):
+        fsynced.append(fd)
+        return real_fsync(fd)
+
+    monkeypatch.setattr(session.os, "fsync", record_fsync)
+    session.save_session("integrity", "goal", _messages(), execution=_journal())
+
+    assert len(fsynced) == 2, "the file and the directory must both be fsynced"
+    assert session.load_session("integrity")["execution"] == _journal()
+
+
+def test_file_fsync_failure_keeps_the_previous_valid_file(tmp_sessions, monkeypatch):
+    before = _seed()
+
+    def refuse(_fd):
+        raise OSError("fsync refused")
+
+    monkeypatch.setattr(session.os, "fsync", refuse)
+    with pytest.raises(OSError, match="fsync refused"):
+        session.save_session("integrity", "goal", _messages(), execution=_journal())
+
+    assert _path().read_bytes() == before
+    assert not list(session.SESSIONS_DIR.glob("integrity.json.tmp"))
+
+
+def test_orphan_temp_file_does_not_replace_a_valid_session(tmp_sessions):
+    _seed()
+    (tmp_sessions / "integrity.json.tmp").write_text("{not a session", encoding="utf-8")
+
+    loaded = session.load_session("integrity")
+
+    assert loaded["goal"] == "goal"
+    assert (tmp_sessions / "integrity.json.tmp").exists()
+
+
+def test_crash_before_replace_keeps_previous_session_and_leaves_orphan_temp(tmp_path):
+    script = r'''
+import os
+import sys
+from pathlib import Path
+from src import session
+
+session.SESSIONS_DIR = Path(sys.argv[1])
+session.save_session("sid", "old", [{"role": "system", "content": "SYS"}])
+session.os.replace = lambda source, target: os._exit(74)
+session.save_session("sid", "new", [{"role": "system", "content": "SYS"}])
+'''
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    session.SESSIONS_DIR = sessions
+    session.save_session("sid", "old", [{"role": "system", "content": "SYS"}])
+
+    crashed = subprocess.run([sys.executable, "-c", script, str(sessions)],
+                             cwd=str(REPO), capture_output=True, text=True, timeout=10)
+
+    assert crashed.returncode == 74
+    assert session.load_session("sid")["goal"] == "old"
+    assert (sessions / "sid.json.tmp").exists()
+
+
+def test_crash_after_replace_leaves_new_session_without_temp_file(tmp_path):
+    script = r'''
+import os
+import sys
+from pathlib import Path
+from src import session
+
+session.SESSIONS_DIR = Path(sys.argv[1])
+session.save_session("sid", "old", [{"role": "system", "content": "SYS"}])
+session._fsync_directory = lambda directory: os._exit(75)
+session.save_session("sid", "new", [{"role": "system", "content": "SYS"}])
+'''
+    sessions = tmp_path / "sessions"
+    sessions.mkdir()
+    session.SESSIONS_DIR = sessions
+    session.save_session("sid", "old", [{"role": "system", "content": "SYS"}])
+
+    crashed = subprocess.run([sys.executable, "-c", script, str(sessions)],
+                             cwd=str(REPO), capture_output=True, text=True, timeout=10)
+
+    assert crashed.returncode == 75
+    assert session.load_session("sid")["goal"] == "new"
+    assert not (sessions / "sid.json.tmp").exists()
 
 
 # 9. Aggregate bounds: explicit errors on save and on load, exact limits accepted

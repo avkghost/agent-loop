@@ -6,6 +6,8 @@ Tools:
   fail(reason)                  always returns an MCP error result carrying the reason
 """
 
+import asyncio
+from pathlib import Path
 from typing import TypedDict
 
 from mcp.server.mcpserver import MCPServer
@@ -36,6 +38,14 @@ def configure(name: str, options: Options) -> str:
 def fail(reason: str) -> str:
     """Always fails with the given reason."""
     raise ToolError(f"remote refused: {reason}")  # an anticipated failure: its message reaches the model
+
+
+@server.tool()
+async def hang_after_commit(effect_path: str) -> str:
+    """Commit a disposable effect, then delay long enough for the client timeout."""
+    Path(effect_path).write_text("committed", encoding="utf-8")
+    await asyncio.sleep(10)
+    return "late response"
 
 
 if __name__ == "__main__":
