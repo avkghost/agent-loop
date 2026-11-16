@@ -7,6 +7,7 @@ Tools:
 """
 
 import asyncio
+import os
 from pathlib import Path
 from typing import TypedDict
 
@@ -46,6 +47,19 @@ async def hang_after_commit(effect_path: str) -> str:
     Path(effect_path).write_text("committed", encoding="utf-8")
     await asyncio.sleep(10)
     return "late response"
+
+
+@server.tool()
+def disconnect_before_commit() -> str:
+    """Terminate the disposable server before committing an external effect."""
+    os._exit(17)
+
+
+@server.tool()
+def disconnect_after_commit(effect_path: str) -> str:
+    """Commit a disposable effect, then terminate the server before replying."""
+    Path(effect_path).write_text("committed", encoding="utf-8")
+    os._exit(17)
 
 
 if __name__ == "__main__":

@@ -214,6 +214,26 @@ def test_real_stdio_timeout_after_commit_is_unknown_and_not_retried(stub_client,
     assert effect_path.read_text(encoding="utf-8") == "committed"
 
 
+@pytest.mark.parametrize("name,arguments,expected_effect", [
+    ("disconnect_before_commit", {}, False),
+    ("disconnect_after_commit", "effect_path", True),
+])
+def test_real_stdio_disconnect_is_unknown_and_never_retried(
+        stub_client, tmp_path, name, arguments, expected_effect):
+    effect_path = tmp_path / "disconnect-effect.txt"
+    call_arguments = {arguments: str(effect_path)} if isinstance(arguments, str) else arguments
+
+    body = _call(stub_client, name, call_arguments)
+
+    assert body["isError"] is True
+    assert body["errorCategory"] == "unknown_outcome"
+    assert body["isRetryable"] is False
+    if expected_effect:
+        assert effect_path.read_text(encoding="utf-8") == "committed"
+    else:
+        assert not effect_path.exists()
+
+
 # --- the run: offered schema, and accurate journal and evidence outcomes -------------------------------------------
 
 @pytest.fixture
