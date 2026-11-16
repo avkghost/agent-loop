@@ -42,7 +42,7 @@ Return exactly this JSON shape:
   "findings": [
     {"id":"F1|F2|F3|F4", "detected":true,
      "classification":"contradiction|unsupported|supported|insufficient_evidence",
-     "evidence_ids":["E1"], "uncertainty":"...",
+     "evidence_ids":["E1"], "uncertainty":"non-empty concise phrase",
      "correction":"...", "abstain":false}
   ],
   "negative_controls": [
@@ -83,7 +83,16 @@ Classification boundaries for this fixture:
 - F4 asks only whether the B generic parameter was removed. Evidence stating
   that the listed types/traits are no longer generic over B supports F4.
 
+Keep F1 and F4 distinct: E1 says the named APIs still exist but changed their
+genericity. Therefore F1 is contradiction (the APIs were not shown removed),
+while F4 is supported (the B parameter was removed). For attribution, use E1
+for F1, F2, and F4, and E3 for F3. Even when a claim is unsupported or
+insufficient, include the evidence item that establishes the limitation.
+
 Do not add fields outside the schema and do not provide an invented import path.
+For every finding, `uncertainty` must be a non-empty concise phrase. If the
+evidence is direct, use a phrase such as "direct evidence" rather than leaving
+the field empty or using null.
 
 EVIDENCE_BUNDLE_JSON:
 {bundle}
@@ -283,7 +292,7 @@ def _classification_score(review: dict[str, Any]) -> dict[str, Any]:
 
 def _correction_is_bounded(item_id: str, item: dict[str, Any]) -> bool:
     correction = item.get("correction")
-    if item_id == "F4" and item.get("classification") == "supported" and correction == "":
+    if item_id == "F4" and item.get("classification") == "supported" and correction in (None, ""):
         return True
     if not isinstance(correction, str) or not correction.strip():
         return False
@@ -292,7 +301,8 @@ def _correction_is_bounded(item_id: str, item: dict[str, Any]) -> bool:
         return ("no longer generic" in lowered or "b type" in lowered
                 or "does not establish" in lowered or "not establish" in lowered)
     if item_id == "F2":
-        return "not established" in lowered or "depends" in lowered or "unsupported" in lowered
+        return ("not established" in lowered or "does not establish" in lowered
+                or "depends" in lowered or "unsupported" in lowered)
     if item_id == "F3":
         if not item.get("abstain"):
             return False

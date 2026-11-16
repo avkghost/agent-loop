@@ -139,6 +139,27 @@ def test_supported_b_generic_claim_does_not_require_correction():
     assert score["findings"]["F4"]["correction_accuracy"]
 
 
+def test_supported_b_generic_claim_may_use_null_correction():
+    score = _classification_score({
+        "findings": [{"id": "F4", "detected": True, "classification": "supported",
+                      "evidence_ids": ["E1"], "uncertainty": "direct evidence",
+                      "correction": None, "abstain": False}],
+        "negative_controls": [], "insufficiency_control": {},
+    })
+    assert score["findings"]["F4"]["correction_accuracy"]
+
+
+def test_unsupported_correction_may_state_that_impact_is_not_established():
+    score = _classification_score({
+        "findings": [{"id": "F2", "detected": True, "classification": "unsupported",
+                      "evidence_ids": ["E1"], "uncertainty": "impact is not established",
+                      "correction": "The evidence does not establish that no code changes are required.",
+                      "abstain": False}],
+        "negative_controls": [], "insufficiency_control": {},
+    })
+    assert score["findings"]["F2"]["correction_accuracy"]
+
+
 def test_dry_run_configuration_is_explicit():
     assert EXPECTED_FINAL_SHA256 == "941e0664e1b26cb13cb06115c0a5fed8d8bc9e8f334ef30141c6250de9208fd9"
     assert EXPECTED_BUNDLE_SHA256 == "09f324307c26d108c77f24409131ac864c324dd14be25d710a4ee8c419d265d1"
