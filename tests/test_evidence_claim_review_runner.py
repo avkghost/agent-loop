@@ -68,10 +68,30 @@ def _args(**overrides):
 
 def _valid_payload(finish_reason="stop", content=None):
     if content is None:
-        content = json.dumps({"findings": [], "negative_controls": [], "insufficiency_control": {}})
+        content = json.dumps(_valid_review())
     return {"id": "r", "choices": [{"finish_reason": finish_reason,
             "message": {"role": "assistant", "content": content}}],
             "usage": {"completion_tokens": 3}}
+
+
+def _valid_review():
+    return {
+        "findings": [
+            {"id": item_id, "detected": True, "classification": classification,
+             "evidence_ids": [evidence_id], "uncertainty": "direct evidence",
+             "correction": "bounded correction", "abstain": item_id == "F3"}
+            for item_id, classification, evidence_id in (
+                ("F1", "contradiction", "E1"),
+                ("F2", "unsupported", "E1"),
+                ("F3", "insufficient_evidence", "E3"),
+                ("F4", "supported", "E1"),
+            )
+        ],
+        "negative_controls": [{"id": item_id, "classification": "supported", "evidence_ids": [evidence_id]}
+                              for item_id, evidence_id in (("N1", "E4"), ("N2", "E3"), ("N3", "E2"))],
+        "insufficiency_control": {"id": "I1", "classification": "insufficient_evidence",
+                                   "abstain": True, "evidence_ids": [], "reason": "path is not established"},
+    }
 
 
 @pytest.fixture(autouse=True)
@@ -280,13 +300,13 @@ def test_malformed_json_is_parse_error_not_incorrect_review(monkeypatch):
 
 
 def test_a_single_json_code_fence_is_accepted(monkeypatch):
-    payload = _valid_payload(content="```json\n{}\n```")
+    payload = _valid_payload(content="```json\n" + json.dumps(_valid_review()) + "\n```")
     FakeSDK.responses = [FakeResponse(payload)]
     monkeypatch.setattr(runner, "_load_session", lambda path: {"session_id": "s"})
     monkeypatch.setattr(runner, "build_fixture", lambda data: ({"evidence": []}, "f", "b"))
     trial = runner.run_pilot(_args(calls=1))["trials"][0]
     assert trial["status"] == "completed"
-    assert trial["review"] == {}
+    assert trial["review"] == _valid_review()
 
 
 @pytest.mark.parametrize("failure,category", [

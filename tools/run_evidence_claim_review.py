@@ -18,6 +18,7 @@ import time
 from urllib.parse import urlsplit, urlunsplit
 from pathlib import Path
 from typing import Any
+from tools.evidence_review_schema import validate_review
 
 
 EXPECTED_FINAL_SHA256 = "941e0664e1b26cb13cb06115c0a5fed8d8bc9e8f334ef30141c6250de9208fd9"
@@ -429,6 +430,10 @@ def run_pilot(args: argparse.Namespace) -> dict[str, Any]:
                               "error": "response content was empty or truncated; review was not scored"})
             else:
                 review, parse_error = _extract_review(payload)
+                if review is not None:
+                    schema_error = validate_review(review, {"F1", "F2", "F3", "F4"}, {"N1", "N2", "N3"})
+                    if schema_error:
+                        review, parse_error = None, f"review schema validation failed: {schema_error}"
                 trial.update({"status": "completed" if review is not None else "response_parse_error",
                               "review": review,
                               "scoring": _classification_score(review) if review is not None else None,

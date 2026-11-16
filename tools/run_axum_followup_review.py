@@ -21,6 +21,7 @@ from tools.run_evidence_claim_review import (
     _tool_content,
     normalize_endpoint,
 )
+from tools.evidence_review_schema import validate_review
 
 SESSION_ID = "29d7d1fd-b2ac-4d53-b061-7f198aac076a"
 RUN_ID = "run_e7d0615eaa0d49babf710d7b68d65afd"
@@ -150,42 +151,7 @@ def _score(review: dict[str, Any]) -> dict[str, Any]:
 
 
 def _validate_review(review: dict[str, Any]) -> str | None:
-    """Fail closed on schema drift before any scoring is performed."""
-    if set(review) != {"findings", "negative_controls", "insufficiency_control"}:
-        return "review root keys do not match the follow-up schema"
-    findings = review.get("findings")
-    if not isinstance(findings, list) or {item.get("id") for item in findings if isinstance(item, dict)} != {"F1", "F2", "F3"}:
-        return "findings must contain exactly F1, F2, and F3"
-    if len(findings) != 3 or any(not isinstance(item, dict) for item in findings):
-        return "findings contain an invalid item"
-    allowed = {"contradiction", "unsupported", "supported", "insufficient_evidence"}
-    for item in findings:
-        if set(item) != {"id", "detected", "classification", "evidence_ids", "uncertainty", "correction", "abstain"}:
-            return f"finding {item.get('id')} keys do not match the schema"
-        if item["classification"] not in allowed or not isinstance(item["detected"], bool):
-            return f"finding {item.get('id')} has invalid classification or detected type"
-        if not isinstance(item["evidence_ids"], list) or not all(isinstance(value, str) for value in item["evidence_ids"]):
-            return f"finding {item.get('id')} evidence_ids must be an array of strings"
-        if not isinstance(item["uncertainty"], str) or not item["uncertainty"].strip():
-            return f"finding {item.get('id')} uncertainty must be non-empty"
-        if item["correction"] is not None and not isinstance(item["correction"], str):
-            return f"finding {item.get('id')} correction must be a string or null"
-        if not isinstance(item["abstain"], bool):
-            return f"finding {item.get('id')} abstain must be boolean"
-    controls = review.get("negative_controls")
-    if not isinstance(controls, list) or len(controls) != 1 or controls[0].get("id") != "N1":
-        return "negative_controls must contain exactly N1"
-    if set(controls[0]) != {"id", "classification", "evidence_ids"} or controls[0]["classification"] not in allowed:
-        return "N1 does not match the schema"
-    insufficiency = review.get("insufficiency_control")
-    if not isinstance(insufficiency, dict) or set(insufficiency) != {"id", "classification", "abstain", "evidence_ids", "reason"}:
-        return "I1 does not match the schema"
-    if (insufficiency["id"] != "I1" or insufficiency["classification"] not in allowed
-            or insufficiency["classification"] != "insufficient_evidence"
-            or insufficiency["abstain"] is not True
-            or not isinstance(insufficiency["reason"], str) or not insufficiency["reason"].strip()):
-        return "I1 must be insufficient_evidence with abstain=true and a quoted reason"
-    return None
+    return validate_review(review, {"F1", "F2", "F3"}, {"N1"})
 
 
 def _extract_followup_review(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
