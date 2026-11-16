@@ -152,6 +152,8 @@ def _tool_content(data: dict[str, Any], call_id: str) -> str:
         content = outcome["content"]
     except (KeyError, TypeError, json.JSONDecodeError) as exc:
         raise RunnerError(f"tool call {call_id} has no usable persisted content") from exc
+    if not isinstance(outcome, dict) or outcome.get("isError") is not False:
+        raise RunnerError(f"tool call {call_id} outcome is not a successful evidence envelope")
     if not isinstance(content, str):
         raise RunnerError(f"tool call {call_id} content is not text")
     return content
