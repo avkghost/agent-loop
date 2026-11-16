@@ -341,6 +341,10 @@ def _request(endpoint: str, api_key: str | None, model: str, bundle: dict[str, A
 def _extract_review(payload: dict[str, Any]) -> tuple[dict[str, Any] | None, str | None]:
     try:
         text = payload["choices"][0]["message"]["content"]
+        if isinstance(text, str):
+            lines = text.strip().splitlines()
+            if len(lines) >= 3 and lines[0].strip() in {"```", "```json"} and lines[-1].strip() == "```":
+                text = "\n".join(lines[1:-1]).strip()
         review = json.loads(text)
     except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
         return None, f"response did not contain structured review JSON: {exc}"

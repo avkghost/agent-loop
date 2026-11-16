@@ -227,12 +227,22 @@ def test_length_empty_reasoning_response_is_incomplete_and_unscored(monkeypatch)
 
 
 def test_malformed_json_is_parse_error_not_incorrect_review(monkeypatch):
-    FakeSDK.responses = [FakeResponse(_valid_payload(content="```json\n{}\n```"))]
+    FakeSDK.responses = [FakeResponse(_valid_payload(content="not json"))]
     monkeypatch.setattr(runner, "_load_session", lambda path: {"session_id": "s"})
     monkeypatch.setattr(runner, "build_fixture", lambda data: ({"evidence": []}, "f", "b"))
     trial = runner.run_pilot(_args(calls=1))["trials"][0]
     assert trial["status"] == "response_parse_error"
     assert trial["scoring"] is None
+
+
+def test_a_single_json_code_fence_is_accepted(monkeypatch):
+    payload = _valid_payload(content="```json\n{}\n```")
+    FakeSDK.responses = [FakeResponse(payload)]
+    monkeypatch.setattr(runner, "_load_session", lambda path: {"session_id": "s"})
+    monkeypatch.setattr(runner, "build_fixture", lambda data: ({"evidence": []}, "f", "b"))
+    trial = runner.run_pilot(_args(calls=1))["trials"][0]
+    assert trial["status"] == "completed"
+    assert trial["review"] == {}
 
 
 @pytest.mark.parametrize("failure,category", [
