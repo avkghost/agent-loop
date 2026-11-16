@@ -121,6 +121,22 @@ def test_dry_run_configuration_is_explicit():
     assert EXPECTED_BUNDLE_SHA256 == "09f324307c26d108c77f24409131ac864c324dd14be25d710a4ee8c419d265d1"
 
 
+def test_target_provenance_requires_the_pinned_run_and_rejects_explicit_mismatch():
+    base = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
+        {"tool_call_id": "394757186", "origin_run_id": None},
+    ]}
+    runner._validate_target_provenance(base)
+
+    with pytest.raises(runner.RunnerError, match="pinned target run"):
+        runner._validate_target_provenance({"runs": [], "execution": []})
+
+    mismatch = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
+        {"tool_call_id": "394757186", "origin_run_id": "run_" + "a" * 32},
+    ]}
+    with pytest.raises(runner.RunnerError, match="different run"):
+        runner._validate_target_provenance(mismatch)
+
+
 def test_endpoint_normalization_and_markdown_rejection():
     assert runner.normalize_endpoint("http://127.0.0.1:1234/v1") == "http://127.0.0.1:1234/v1"
     assert runner.normalize_endpoint("http://127.0.0.1:1234/v1/chat/completions") == "http://127.0.0.1:1234/v1"

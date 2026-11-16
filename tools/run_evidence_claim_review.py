@@ -24,6 +24,7 @@ EXPECTED_FINAL_SHA256 = "941e0664e1b26cb13cb06115c0a5fed8d8bc9e8f334ef30141c6250
 EXPECTED_BUNDLE_SHA256 = "09f324307c26d108c77f24409131ac864c324dd14be25d710a4ee8c419d265d1"
 DEFAULT_RUN_ID = "run_d2ffcd5e2ee14c53915925de6425369c"
 DEFAULT_SESSION = Path.home() / ".agent_loop" / "sessions" / "498653a0-8a5e-4f47-8bf1-15a0c47622a5.json"
+EVIDENCE_CALL_IDS = frozenset({"394757186", "951879790", "162183842"})
 
 SYSTEM_INSTRUCTION = """You are an independent evidence-to-claim reviewer.
 Use only the supplied evidence bundle and target answer. Do not use prior
@@ -156,8 +157,24 @@ def _tool_content(data: dict[str, Any], call_id: str) -> str:
     return content
 
 
+def _validate_target_provenance(data: dict[str, Any]) -> None:
+    """Fail closed if the pinned target run is absent or explicitly mismatched."""
+    runs = data.get("runs")
+    if not isinstance(runs, list) or not any(
+            isinstance(item, dict) and item.get("run_id") == DEFAULT_RUN_ID for item in runs):
+        raise RunnerError(f"pinned target run is not present in the session: {DEFAULT_RUN_ID}")
+    for item in data.get("execution", []):
+        if not isinstance(item, dict) or item.get("tool_call_id") not in EVIDENCE_CALL_IDS:
+            continue
+        origin_run_id = item.get("origin_run_id")
+        if origin_run_id is not None and origin_run_id != DEFAULT_RUN_ID:
+            raise RunnerError(
+                f"evidence tool call {item.get('tool_call_id')} belongs to a different run: {origin_run_id}")
+
+
 def build_fixture(data: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     """Build the canonical fixture from persisted observations without writing it."""
+    _validate_target_provenance(data)
     messages = data.get("messages")
     if not isinstance(messages, list) or len(messages) <= 72:
         raise RunnerError("session does not contain the canonical final message at index 72")
