@@ -304,6 +304,21 @@ def test_invalid_origin_run_id_is_rejected():
         }])
 
 
+def test_recovery_preserves_execution_record_origin_run_id():
+    run_id = "run_" + "a" * 32
+    journal = execution.ExecutionJournal.from_dicts([{
+        "tool_call_id": "call_recover", "tool_name": "mcp_tool", "arguments": {},
+        "status": "running", "outcome": None, "error_category": None,
+        "origin_run_id": run_id,
+    }])
+
+    recovered = journal.recover_unresolved("outcome is unknown")
+
+    assert recovered[0].status is execution.ToolCallStatus.UNKNOWN
+    assert recovered[0].origin_run_id == run_id
+    assert journal.to_dicts()[0]["origin_run_id"] == run_id
+
+
 def test_pending_is_persisted_before_dispatch_and_terminal_result(tmp_path, monkeypatch, run_loop, streamed_response):
     snapshots = []
 
