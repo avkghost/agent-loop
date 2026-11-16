@@ -69,6 +69,17 @@ Use the supplied evidence IDs to attribute support or limitation. N1-N3 are
 controls, not pre-labeled answers. I1 has no evidence item establishing an
 exact import path, so it may require abstention.
 
+Classification boundaries for this fixture:
+- F1 asserts that the listed types/traits were removed. Evidence saying they
+  are no longer generic over B does not establish removal; classify that
+  wording as contradiction.
+- F2 is scoped to the handler/router generic changes in F1. If the evidence
+  does not establish project-specific migration impact, classify the claim as
+  unsupported rather than inventing an impact or treating an unrelated body
+  change as proof about these generic changes.
+- F3 asserts an exact import path. A crate move without that exact path is
+  insufficient evidence; abstain rather than choosing or rejecting a path.
+
 Do not add fields outside the schema and do not provide an invented import path.
 
 EVIDENCE_BUNDLE_JSON:
