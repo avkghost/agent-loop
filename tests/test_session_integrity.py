@@ -345,7 +345,10 @@ session.save_session("sid", "new", [{"role": "system", "content": "SYS"}])
                              cwd=str(REPO), capture_output=True, text=True, timeout=10)
 
     assert crashed.returncode == 75
-    assert session.load_session("sid")["goal"] == "new"
+    loaded = session.load_session("sid")
+    assert validate_session_data(loaded) == "structured"
+    assert loaded["goal"] == "new"
+    assert loaded["messages"] == [{"role": "system", "content": "SYS"}]
     assert not (sessions / "sid.json.tmp").exists()
 
 
