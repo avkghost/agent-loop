@@ -3,11 +3,221 @@
 from tests import scripted_provider  # noqa: E402
 import copy
 import json
+import sqlite3
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
 from src import compaction, dispatch, envelope, execution, session
 from tests.conftest import make_streamed_response, protocol_violations
+
+
+REPO = Path(__file__).resolve().parents[1]
+SUBPROCESS_TIMEOUT_SECONDS = 30
+
+
+CRASH_AFTER_EXTERNAL_COMMIT = r'''
+import asyncio
+import json
+import os
+import sqlite3
+import sys
+from pathlib import Path
+
+from src import loop, provider, session
+
+
+session_dir, effect_db, session_id = sys.argv[1:]
+session.SESSIONS_DIR = Path(session_dir)
+loop.load_project_guidelines = lambda: None
+
+
+class OneToolProvider:
+    async def complete(self, messages, tools, options, on_text=None):
+        return provider.ProviderTurn(
+            outcome=provider.TurnOutcome.TOOL_CALLS,
+            tool_calls=[{
+                "id": "call_external_once",
+                "type": "function",
+                "function": {"name": "run_command", "arguments": "{}"},
+            }],
+            finish_reason=provider.FinishReason.TOOL_CALLS,
+            usage=provider.TokenUsage.reported(1, 1),
+        )
+
+    async def aclose(self):
+        return None
+
+
+async def external_action(tool_name, tool_input, *args, **kwargs):
+    connection = sqlite3.connect(effect_db)
+    connection.execute("CREATE TABLE IF NOT EXISTS effects (key TEXT PRIMARY KEY)")
+    connection.execute("INSERT INTO effects(key) VALUES (?)", ("crash-boundary-effect",))
+    connection.commit()
+    connection.close()
+    # This is the deterministic boundary: the external commit is durable, but the
+    # loop has not yet transitioned the journal record to COMPLETED or persisted it.
+    os._exit(73)
+
+
+async def main():
+    loop.dispatch.dispatch_tool_async = external_action
+    event_loop = asyncio.get_running_loop()
+    await loop._agent_loop_run(
+        "crash recovery goal",
+        type("Mcp", (), {"get_openai_tools": lambda self: []})(),
+        event_loop,
+        system_prompt_override="crash recovery test",
+        session_id=session_id,
+        provider=OneToolProvider(),
+    )
+
+
+asyncio.run(main())
+'''
+
+
+RECOVER_AFTER_CRASH = r'''
+import asyncio
+import json
+import sqlite3
+import sys
+from pathlib import Path
+
+from src import loop, provider, session
+
+
+session_dir, effect_db, session_id, report_path = sys.argv[1:]
+session.SESSIONS_DIR = Path(session_dir)
+loop.load_project_guidelines = lambda: None
+dispatch_count = {"value": 0}
+
+
+class StopProvider:
+    async def complete(self, messages, tools, options, on_text=None):
+        return provider.ProviderTurn(
+            outcome=provider.TurnOutcome.COMPLETED,
+            content="recovered without redispatch",
+            finish_reason=provider.FinishReason.STOP,
+            usage=provider.TokenUsage.reported(1, 1),
+        )
+
+    async def aclose(self):
+        return None
+
+
+async def forbidden_dispatch(*args, **kwargs):
+    dispatch_count["value"] += 1
+    raise AssertionError("recovery redispatched the unresolved external action")
+
+
+async def main():
+    data = session.load_session(session_id)
+    assert data is not None
+    runs, evidence, legacy_history = session.resume_history(data)
+    loop.dispatch.dispatch_tool_async = forbidden_dispatch
+    event_loop = asyncio.get_running_loop()
+    outcome = await loop._agent_loop_run(
+        "crash recovery goal",
+        type("Mcp", (), {"get_openai_tools": lambda self: []})(),
+        event_loop,
+        system_prompt_override="crash recovery test",
+        session_id=session_id,
+        resume_messages=data["messages"],
+        resume_objective=data["objective"],
+        resume_summary=data["summary"],
+        resume_execution=data["execution"],
+        resume_runs=runs,
+        resume_evidence=evidence,
+        legacy_history=legacy_history,
+        provider=StopProvider(),
+    )
+    with sqlite3.connect(effect_db) as connection:
+        effect_count = connection.execute(
+            "SELECT COUNT(*) FROM effects WHERE key = ?", ("crash-boundary-effect",)
+        ).fetchone()[0]
+    saved = session.load_session(session_id)
+    Path(report_path).write_text(json.dumps({
+        "outcome": outcome.to_dict(),
+        "dispatch_count": dispatch_count["value"],
+        "effect_count": effect_count,
+        "execution": saved["execution"],
+        "messages": saved["messages"],
+    }))
+
+
+asyncio.run(main())
+'''
+
+
+def test_crash_after_external_commit_recovers_unknown_without_redispatch(tmp_path):
+    """A durable side effect may precede the terminal journal write; recovery must not replay it."""
+    session_dir = tmp_path / "sessions"
+    effect_db = tmp_path / "effects.sqlite"
+    report_path = tmp_path / "recovery.json"
+    session_id = "crash-boundary"
+
+    try:
+        crashed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                CRASH_AFTER_EXTERNAL_COMMIT,
+                str(session_dir),
+                str(effect_db),
+                session_id,
+            ],
+            cwd=str(REPO),
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"process A timed out after {SUBPROCESS_TIMEOUT_SECONDS}s: {exc}")
+    assert crashed.returncode == 73, crashed.stderr
+
+    interrupted = json.loads((session_dir / f"{session_id}.json").read_text())
+    assert interrupted["execution"][0]["tool_call_id"] == "call_external_once"
+    assert interrupted["execution"][0]["status"] == "running"
+    with sqlite3.connect(effect_db) as connection:
+        assert connection.execute("SELECT COUNT(*) FROM effects").fetchone()[0] == 1
+
+    try:
+        recovered = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                RECOVER_AFTER_CRASH,
+                str(session_dir),
+                str(effect_db),
+                session_id,
+                str(report_path),
+            ],
+            cwd=str(REPO),
+            capture_output=True,
+            text=True,
+            timeout=SUBPROCESS_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired as exc:
+        pytest.fail(f"process B timed out after {SUBPROCESS_TIMEOUT_SECONDS}s: {exc}")
+    assert recovered.returncode == 0, recovered.stderr
+    report = json.loads(report_path.read_text())
+
+    assert report["effect_count"] == 1
+    assert report["dispatch_count"] == 0
+    assert report["outcome"]["status"] != "completed_verified"
+    execution_record = report["execution"][0]
+    assert execution_record["tool_call_id"] == "call_external_once"
+    assert execution_record["status"] == "unknown"
+    assert "was not re-executed" in execution_record["outcome"]
+    assert any(
+        message.get("role") == "tool"
+        and message.get("tool_call_id") == "call_external_once"
+        and "was not re-executed" in message.get("content", "")
+        for message in report["messages"]
+    )
 
 
 def _call(call_id="call_1"):
