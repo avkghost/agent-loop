@@ -235,3 +235,45 @@ def test_terminal_persistence_failure_stops_before_next_provider_request(monkeyp
     ], dispatch_fn=lambda *a, **k: "done", session_id="sid")
 
     assert len(post.payloads) == 1
+
+
+def test_terminal_persistence_failure_leaves_running_call_for_conservative_recovery(
+        monkeypatch, run_loop, streamed_response, tmp_sessions):
+    real_save = session.save_session
+    phase = {"value": "initial"}
+
+    def fail_terminal_save(*args, **kwargs):
+        if phase["value"] == "initial" and kwargs["execution"] and kwargs["execution"][0]["status"] == "completed":
+            raise OSError("terminal save failed")
+        return real_save(*args, **kwargs)
+
+    monkeypatch.setattr(session, "save_session", fail_terminal_save)
+    dispatched = []
+    run_loop([
+        streamed_response(finish_reason="tool_calls", tool_calls=[{
+            "id": "call_terminal_recovery", "name": "read_file", "arguments": "{}",
+        }]),
+        streamed_response(finish_reason="stop", content="must not be requested"),
+    ], dispatch_fn=lambda *a, **k: dispatched.append(a) or "done", session_id="terminal-recovery")
+
+    saved = session.load_session("terminal-recovery")
+    assert saved["execution"][0]["status"] == "running"
+    assert not any(message.get("role") == "tool" for message in saved["messages"])
+    assert len(dispatched) == 1 and dispatched[0][0] == "read_file"
+
+    phase["value"] = "resume"
+    run_loop([
+        streamed_response(finish_reason="stop", content="recovered"),
+    ], dispatch_fn=lambda *a, **k: pytest.fail("recovered terminal call was redispatched"),
+             session_id="terminal-recovery", resume_messages=saved["messages"],
+             resume_objective=saved["objective"], resume_summary=saved["summary"],
+             resume_execution=saved["execution"])
+
+    recovered = session.load_session("terminal-recovery")
+    assert recovered["execution"][0]["status"] == "unknown"
+    assert any(
+        message.get("role") == "tool"
+        and message.get("tool_call_id") == "call_terminal_recovery"
+        and "was not re-executed" in message.get("content", "")
+        for message in recovered["messages"]
+    )
