@@ -123,7 +123,8 @@ def test_dry_run_configuration_is_explicit():
 
 def test_target_provenance_requires_the_pinned_run_and_rejects_explicit_mismatch():
     base = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
-        {"tool_call_id": "394757186", "origin_run_id": None, "status": "completed"},
+        {"tool_call_id": "394757186", "origin_run_id": None, "status": "completed",
+         "tool_name": "mcp_context-mode_ctx_search"},
     ]}
     runner._validate_target_provenance(base)
 
@@ -131,16 +132,25 @@ def test_target_provenance_requires_the_pinned_run_and_rejects_explicit_mismatch
         runner._validate_target_provenance({"runs": [], "execution": []})
 
     mismatch = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
-        {"tool_call_id": "394757186", "origin_run_id": "run_" + "a" * 32, "status": "completed"},
+        {"tool_call_id": "394757186", "origin_run_id": "run_" + "a" * 32, "status": "completed",
+         "tool_name": "mcp_context-mode_ctx_search"},
     ]}
     with pytest.raises(runner.RunnerError, match="different run"):
         runner._validate_target_provenance(mismatch)
 
     incomplete = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
-        {"tool_call_id": "394757186", "origin_run_id": None, "status": "unknown"},
+        {"tool_call_id": "394757186", "origin_run_id": None, "status": "unknown",
+         "tool_name": "mcp_context-mode_ctx_search"},
     ]}
     with pytest.raises(runner.RunnerError, match="not completed"):
         runner._validate_target_provenance(incomplete)
+
+    wrong_tool = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
+        {"tool_call_id": "394757186", "origin_run_id": None, "status": "completed",
+         "tool_name": "run_command"},
+    ]}
+    with pytest.raises(runner.RunnerError, match="unexpected tool name"):
+        runner._validate_target_provenance(wrong_tool)
 
 
 def test_tool_content_rejects_error_or_malformed_evidence_envelopes():

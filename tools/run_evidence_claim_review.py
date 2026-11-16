@@ -171,6 +171,10 @@ def _validate_target_provenance(data: dict[str, Any]) -> None:
         if item.get("status") != "completed":
             raise RunnerError(
                 f"evidence tool call {item.get('tool_call_id')} is not completed: {item.get('status')}")
+        if item.get("tool_name") != "mcp_context-mode_ctx_search":
+            raise RunnerError(
+                f"evidence tool call {item.get('tool_call_id')} has unexpected tool name: "
+                f"{item.get('tool_name')}")
         origin_run_id = item.get("origin_run_id")
         if origin_run_id is not None and origin_run_id != DEFAULT_RUN_ID:
             raise RunnerError(
