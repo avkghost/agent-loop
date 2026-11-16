@@ -183,6 +183,19 @@ def test_evidence_cannot_reference_a_journal_call_owned_by_another_run(tmp_sessi
         evidence=[_evidence_record(evidence_id, run_b)]))
 
 
+def test_execution_origin_may_precede_run_history_persistence(tmp_sessions):
+    run_id = "run_" + "f" * 32
+    journal = _journal()
+    journal[0]["origin_run_id"] = run_id
+
+    session.save_session("early-origin", "goal", _messages(), execution=journal)
+
+    loaded = session.load_session("early-origin")
+    assert loaded["runs"] == []
+    assert loaded["execution"][0]["origin_run_id"] == run_id
+    assert validate_session_data(loaded) == "structured"
+
+
 @pytest.mark.parametrize("run_id", ["run-42", "run_XYZ", "", 7, None])
 def test_corrupt_run_identifiers_are_rejected_before_save(tmp_sessions, run_id):
     before = _seed()
