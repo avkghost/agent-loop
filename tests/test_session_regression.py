@@ -5,7 +5,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from src import cli, compaction, loop, session
+from src import cli, compaction, loop, runs, session
 from tests.conftest import make_streamed_response
 
 
@@ -61,6 +61,22 @@ def test_cli_inspect_shows_unknown_execution_without_resuming(tmp_sessions, caps
     output = capsys.readouterr().out
     assert "status=unknown category=unknown_outcome" in output
     assert session.INTERRUPTED_RESULT in output
+
+
+def test_cli_inspect_resolves_run_id_to_session(monkeypatch, tmp_sessions, capsys):
+    run_id = "run_" + "a" * 32
+    session.save_session("inspect-run", "goal", [{"role": "system", "content": "sys"}],
+                         runs=[{"schema": runs.RUN_SCHEMA, "run_id": run_id, "goal": "goal",
+                                "status": "completed_unverified", "reason": "done",
+                                "started_at": "2026-01-01T00:00:00", "finished_at": "2026-01-01T00:00:01",
+                                "iteration_count": 1, "final_message": "done", "evidence_ids": [],
+                                "evidence_dropped": 0}])
+
+    cli.main(["inspect", run_id])
+
+    output = capsys.readouterr().out
+    assert f"Resolved run_id {run_id} to session_id inspect-run" in output
+    assert "Session: inspect-run" in output
 
 
 def test_interrupted_write_preserves_existing_session(tmp_sessions, monkeypatch):

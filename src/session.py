@@ -397,6 +397,21 @@ def list_sessions() -> List[Dict[str, Any]]:
     return sessions
 
 
+def find_session_by_run_id(run_id: str) -> Optional[str]:
+    """Return the persisted session ID that owns ``run_id``, if one is readable."""
+    _ensure_dir()
+    for session_file in SESSIONS_DIR.glob("*.json"):
+        try:
+            with open(session_file) as f:
+                data = json.load(f)
+            if any(isinstance(run, dict) and run.get("run_id") == run_id
+                   for run in data.get("runs", [])):
+                return data.get("session_id", session_file.stem)
+        except (OSError, json.JSONDecodeError, AttributeError):
+            continue
+    return None
+
+
 def delete_session(session_id: str) -> bool:
     """Delete a saved session."""
     session_path = SESSIONS_DIR / f"{session_id}.json"

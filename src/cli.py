@@ -10,7 +10,8 @@ from . import acceptance, config, loop, jobs, terminal_input, verification
 from .authorization import SessionAuthorization
 from .runtime import AgentRuntime, SessionError, load_mcp_config
 from .config_loader import load_config, apply_config_overrides
-from .session import SESSION_FORMAT, SessionLoadError, SessionValidationError, list_sessions, load_session, validate_session_data, resume_history
+from .session import (SESSION_FORMAT, SessionLoadError, SessionValidationError, find_session_by_run_id,
+                      list_sessions, load_session, validate_session_data, resume_history)
 from .execution import ExecutionJournal
 from .tools.mcp_client import MCPClientManager
 from .agents_loader import load_agents, get_agent_description
@@ -200,6 +201,7 @@ def _report_run(outcome, session_id: str, criteria) -> None:
     latest = _latest_results(session_id, outcome.run_id) if criteria else {}
     label, detail = _verdict(outcome, criteria or [], latest)
     print(f"\n🧾 Run {outcome.run_id}: {label} — {detail}")
+    print(f"   session_id: {session_id}")
     print(f"   status {outcome.status}: {outcome.reason}")
     unknown = _unresolved_unknowns(session_id)
     if unknown:
@@ -221,6 +223,12 @@ def _report_run(outcome, session_id: str, criteria) -> None:
 
 def _inspect_session(session_id: str) -> None:
     """Print persisted session and execution state without changing or resuming it."""
+    requested_id = session_id
+    if session_id.startswith("run_"):
+        resolved = find_session_by_run_id(session_id)
+        if resolved:
+            session_id = resolved
+            print(f"ℹ️ Resolved run_id {requested_id} to session_id {session_id}")
     try:
         data = load_session(session_id)
     except SessionLoadError as e:
