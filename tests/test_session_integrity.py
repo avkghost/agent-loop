@@ -107,6 +107,38 @@ def test_a_successful_save_is_accepted_by_the_loader(tmp_sessions):
     assert loaded["messages"] == _messages()
 
 
+@pytest.mark.parametrize("payload", [
+    '{"format": 5, "session_id": "integrity",',
+    '{"format": 5, "messages": [',
+    '{"format": 5, "execution": [{"tool_call_id": "call_ok"}',
+])
+def test_partial_session_json_fails_closed_without_becoming_resumable(tmp_sessions, payload):
+    (tmp_sessions / "integrity.json").write_text(payload, encoding="utf-8")
+
+    with pytest.raises(session.SessionLoadError) as exc:
+        session.load_session("integrity")
+
+    assert exc.value.category == "invalid_json"
+
+
+@pytest.mark.parametrize("document,expected", [
+    ({"format": 5, "session_id": "integrity", "goal": "goal", "messages": []},
+     "format 5 is missing required field"),
+    ({"format": 5, "session_id": "integrity", "goal": "goal", "objective": "Objective: goal",
+      "summary": None, "messages": [{"role": "system", "content": "sys"}],
+      "execution": [{"tool_call_id": "call_ok", "tool_name": "list_directory", "arguments": {},
+                      "status": "completed", "outcome": None, "error_category": None}],
+      "runs": [], "evidence": [], "legacy_history": False, "saved_at": "2026-01-01T00:00:00"},
+     "terminal execution records require an outcome"),
+])
+def test_structurally_partial_session_is_rejected_before_resume(tmp_sessions, document, expected):
+    (tmp_sessions / "integrity.json").write_text(json.dumps(document), encoding="utf-8")
+
+    loaded = session.load_session("integrity")
+    with pytest.raises(SessionValidationError, match=expected):
+        validate_session_data(loaded)
+
+
 # 4-6. Run and evidence ownership, evidence references, corrupt identifiers
 
 def test_evidence_listed_by_a_run_that_does_not_own_it_is_rejected_before_save(tmp_sessions):
