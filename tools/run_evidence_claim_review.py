@@ -165,20 +165,25 @@ def _validate_target_provenance(data: dict[str, Any]) -> None:
     if not isinstance(runs, list) or not any(
             isinstance(item, dict) and item.get("run_id") == DEFAULT_RUN_ID for item in runs):
         raise RunnerError(f"pinned target run is not present in the session: {DEFAULT_RUN_ID}")
+    seen_ids: set[str] = set()
     for item in data.get("execution", []):
         if not isinstance(item, dict) or item.get("tool_call_id") not in EVIDENCE_CALL_IDS:
             continue
+        call_id = item["tool_call_id"]
+        if call_id in seen_ids:
+            raise RunnerError(f"duplicate evidence tool call ID: {call_id}")
+        seen_ids.add(call_id)
         if item.get("status") != "completed":
             raise RunnerError(
-                f"evidence tool call {item.get('tool_call_id')} is not completed: {item.get('status')}")
+                f"evidence tool call {call_id} is not completed: {item.get('status')}")
         if item.get("tool_name") != "mcp_context-mode_ctx_search":
             raise RunnerError(
-                f"evidence tool call {item.get('tool_call_id')} has unexpected tool name: "
+                f"evidence tool call {call_id} has unexpected tool name: "
                 f"{item.get('tool_name')}")
         origin_run_id = item.get("origin_run_id")
         if origin_run_id is not None and origin_run_id != DEFAULT_RUN_ID:
             raise RunnerError(
-                f"evidence tool call {item.get('tool_call_id')} belongs to a different run: {origin_run_id}")
+                f"evidence tool call {call_id} belongs to a different run: {origin_run_id}")
 
 
 def _require_source_chunk(text: str, source: str, chunk: int) -> None:

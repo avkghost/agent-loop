@@ -152,6 +152,15 @@ def test_target_provenance_requires_the_pinned_run_and_rejects_explicit_mismatch
     with pytest.raises(runner.RunnerError, match="unexpected tool name"):
         runner._validate_target_provenance(wrong_tool)
 
+    duplicate = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
+        {"tool_call_id": "394757186", "origin_run_id": None, "status": "completed",
+         "tool_name": "mcp_context-mode_ctx_search"},
+        {"tool_call_id": "394757186", "origin_run_id": None, "status": "completed",
+         "tool_name": "mcp_context-mode_ctx_search"},
+    ]}
+    with pytest.raises(runner.RunnerError, match="duplicate evidence tool call ID"):
+        runner._validate_target_provenance(duplicate)
+
 
 def test_tool_content_rejects_error_or_malformed_evidence_envelopes():
     with pytest.raises(runner.RunnerError, match="not a successful evidence envelope"):
