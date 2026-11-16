@@ -58,6 +58,10 @@ def parse_args(args=None):
     # sessions: List saved sessions
     sessions_parser = subparsers.add_parser("sessions", help="List saved sessions")
 
+    # inspect: Show persisted execution state without resuming or dispatching anything
+    inspect_parser = subparsers.add_parser("inspect", help="Inspect a saved session without running it")
+    inspect_parser.add_argument("session_id", help="Session ID to inspect")
+
     # tools: List available tools
     tools_parser = subparsers.add_parser("tools", help="List available tools")
     tools_parser.add_argument("--config", help="Config file path")
@@ -90,7 +94,7 @@ def parse_args(args=None):
     if args is None:
         args = sys.argv[1:]
 
-    if args and args[0] not in ["run", "repl", "resume", "sessions", "tools", "config", "agent", "agents", "skill", "skills"]:
+    if args and args[0] not in ["run", "repl", "resume", "sessions", "inspect", "tools", "config", "agent", "agents", "skill", "skills"]:
         args = ["run"] + args
 
     return parser.parse_args(args)
@@ -213,6 +217,39 @@ def _report_run(outcome, session_id: str, criteria) -> None:
         else:
             line = f"{result.status} (attempt {result.attempt} of {result.budget}): {result.observation}"
         print(f"   · {criterion.criterion_id} [{criterion.criterion_type}]: {line}")
+
+
+def _inspect_session(session_id: str) -> None:
+    """Print persisted session and execution state without changing or resuming it."""
+    try:
+        data = load_session(session_id)
+    except SessionLoadError as e:
+        print(f"❌ Cannot load session ({e.category}): {e}")
+        return
+    if not data:
+        print(f"❌ Session not found: {session_id}")
+        return
+    try:
+        validate_session_data(data)
+    except SessionValidationError as e:
+        print(f"❌ Cannot inspect session: {e}")
+        return
+
+    records = [item for item in data.get("execution", []) if isinstance(item, dict)]
+    print(f"📂 Session: {data.get('session_id', session_id)}")
+    print(f"   goal: {data.get('goal', '')}")
+    print(f"   format: {data.get('format', 'legacy')}")
+    print(f"   execution records: {len(records)}")
+    if not records:
+        print("   no execution records")
+        return
+    for record in records:
+        status = record.get("status", "unknown")
+        category = record.get("error_category") or "-"
+        print(f"   • {record.get('tool_call_id', '<missing>')} {record.get('tool_name', '<missing>')} "
+              f"status={status} category={category}")
+        if status == "unknown":
+            print(f"     outcome: {record.get('outcome')}")
 
 
 def _close_repl(runtime, repl_session) -> None:
@@ -413,6 +450,9 @@ def _main(args=None):
         print("-" * 80)
         for session in sessions:
             print(f"{session['session_id']:<40} {session['goal']:<30} {session['message_count']:<8}")
+
+    elif command == "inspect":
+        _inspect_session(parsed.session_id)
 
     elif command == "tools":
         from .tools import get_all_tools

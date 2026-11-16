@@ -41,6 +41,28 @@ def test_malformed_session_returns_none(tmp_sessions):
     assert exc.value.category == "invalid_json"
 
 
+def test_cli_inspect_shows_unknown_execution_without_resuming(tmp_sessions, capsys):
+    messages = [
+        {"role": "system", "content": "system"},
+        {"role": "assistant", "content": "calling", "tool_calls": [
+            {"id": "call_unknown", "type": "function",
+             "function": {"name": "write_file", "arguments": "{}"}}
+        ]},
+        {"role": "tool", "tool_call_id": "call_unknown", "content": session.INTERRUPTED_RESULT},
+    ]
+    session.save_session("inspect-me", "goal", messages, execution=[{
+        "tool_call_id": "call_unknown", "tool_name": "write_file", "arguments": {},
+        "status": "unknown", "outcome": session.INTERRUPTED_RESULT,
+        "error_category": "unknown_outcome",
+    }])
+
+    cli.main(["inspect", "inspect-me"])
+
+    output = capsys.readouterr().out
+    assert "status=unknown category=unknown_outcome" in output
+    assert session.INTERRUPTED_RESULT in output
+
+
 def test_interrupted_write_preserves_existing_session(tmp_sessions, monkeypatch):
     original = [{"role": "system", "content": "sys"}, {"role": "user", "content": "original"}]
     replacement = [{"role": "system", "content": "sys"}, {"role": "user", "content": "replacement"}]
