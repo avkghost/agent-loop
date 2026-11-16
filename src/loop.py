@@ -423,7 +423,7 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
         non-success envelope is intentionally inconclusive rather than a passing check.
         """
         call_id = "verification_" + uuid.uuid4().hex
-        journal.register(call_id, "verification_command", {"command": command})
+        journal.register(call_id, "verification_command", {"command": command}, ctx.recorder.run_id)
         journal.transition(call_id, execution.ToolCallStatus.RUNNING)
         if not _persist():
             ctx.verification_persistence_failed = True
@@ -594,6 +594,7 @@ async def _run_body(user_goal: str, mcp_client: MCPClientManager, event_loop: as
                     declared_call.get("id"),
                     received.get("name") or "",
                     received.get("arguments", "{}"),
+                    ctx.recorder.run_id,
                 )
         if not _persist():
             ctx.recorder.end(runs.RunStatus.NEEDS_ATTENTION, "the session could not be saved after the model turn; durability is unknown")

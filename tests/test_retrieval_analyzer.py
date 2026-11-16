@@ -71,6 +71,34 @@ def test_multiple_runs_fail_closed(tmp_path):
         analyze_session(path, run_id)
 
 
+def test_multiple_runs_select_only_records_owned_by_requested_run(tmp_path):
+    run_id = "run_" + "a" * 32
+    other_run_id = "run_" + "b" * 32
+    path = _session(tmp_path, runs=_run(run_id) + [{"run_id": other_run_id}], execution=[
+        {**_record("owned", {"queries": ["q"]}, "https://docs.example/a #1: owned"),
+         "origin_run_id": run_id},
+        {**_record("foreign", {"queries": ["q"]}, "https://docs.example/b #2: foreign"),
+         "origin_run_id": other_run_id},
+    ])
+    report = analyze_session(path, run_id)
+    assert report["tool_call_count"] == 1
+    assert report["search_count"] == 1
+    assert report["selected_execution_count"] == 1
+    assert report["owned_execution_count"] == 1
+    assert report["unowned_execution_count"] == 0
+    assert report["foreign_execution_count"] == 1
+    assert report["search_calls"][0]["tool_call_id"] == "owned"
+
+
+def test_multiple_runs_with_legacy_execution_record_fail_closed(tmp_path):
+    run_id = "run_" + "a" * 32
+    path = _session(tmp_path, runs=_run(run_id) + [{"run_id": "run_" + "b" * 32}], execution=[
+        _record("legacy", {"queries": ["q"]}, "https://docs.example/a #1: ambiguous"),
+    ])
+    with pytest.raises(AnalysisError, match="without origin_run_id"):
+        analyze_session(path, run_id)
+
+
 def test_missing_run_and_malformed_data_fail(tmp_path):
     path = _session(tmp_path, runs=_run(), execution=[])
     with pytest.raises(AnalysisError, match="not present"):

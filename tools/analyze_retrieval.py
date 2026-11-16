@@ -147,19 +147,32 @@ def analyze_session(path: str | Path, run_id: str) -> dict[str, Any]:
         raise AnalysisError(f"run {run_id} is not present in the session")
     if len(matching) != 1:
         raise AnalysisError(f"run {run_id} appears {len(matching)} times")
-    if len(runs) != 1:
-        raise AnalysisError(
-            "session contains multiple runs, but execution records have no run_id; "
-            "tool-call membership cannot be reconstructed safely"
-        )
-
     execution = data.get("execution")
     if not isinstance(execution, list):
         raise AnalysisError("session execution journal is not a list")
+    if len(runs) != 1 and not execution:
+        raise AnalysisError(
+            "session contains multiple runs, but execution records are unavailable; "
+            "tool-call membership cannot be reconstructed safely"
+        )
     records = []
+    owned_execution_count = 0
+    unowned_execution_count = 0
+    foreign_execution_count = 0
     for index, record in enumerate(execution):
         if not isinstance(record, dict) or not isinstance(record.get("tool_call_id"), str):
             raise AnalysisError(f"execution record {index} has no usable tool_call_id")
+        origin_run_id = record.get("origin_run_id")
+        if origin_run_id is not None and not isinstance(origin_run_id, str):
+            raise AnalysisError(f"execution record {index} has an invalid origin_run_id")
+        if origin_run_id is None:
+            unowned_execution_count += 1
+        elif origin_run_id == run_id:
+            owned_execution_count += 1
+        else:
+            foreign_execution_count += 1
+        if origin_run_id is not None and origin_run_id != run_id:
+            continue
         args, arg_error = _json_arguments(record.get("arguments"))
         output_text, envelope_error = _observation_text(record.get("outcome"))
         persisted_outcome = record.get("outcome", "")
@@ -210,6 +223,17 @@ def analyze_session(path: str | Path, run_id: str) -> dict[str, Any]:
             })
         records.append(item)
 
+    if len(runs) != 1 and unowned_execution_count:
+        raise AnalysisError(
+            "session contains multiple runs and execution records without origin_run_id; "
+            "tool-call membership cannot be reconstructed safely"
+        )
+    if len(runs) == 1 and foreign_execution_count:
+        raise AnalysisError(
+            "execution records belong to a different run than the session's only run"
+        )
+    selected_execution_count = len(records)
+
     search = [r for r in records if r["tool_name"] == "mcp_context-mode_ctx_search"]
     message_cross_check = _message_cross_check(
         data.get("messages"), {r["tool_call_id"] for r in records}
@@ -251,6 +275,10 @@ def analyze_session(path: str | Path, run_id: str) -> dict[str, Any]:
         "session_format": data.get("format"),
         "run_status": matching[0].get("status"),
         "run_count": len(runs),
+        "selected_execution_count": selected_execution_count,
+        "owned_execution_count": owned_execution_count,
+        "unowned_execution_count": unowned_execution_count,
+        "foreign_execution_count": foreign_execution_count,
         "tool_call_count": len(records),
         "tool_counts": dict(sorted(Counter(str(r["tool_name"]) for r in records).items())),
         "message_cross_check": message_cross_check,
@@ -281,7 +309,8 @@ def analyze_session(path: str | Path, run_id: str) -> dict[str, Any]:
         "limitations": [
             "Reference extraction is adapter-specific and recognizes URL-plus-#chunk text only.",
             "Calls whose output contains embedded prior output are flagged; their references are not asserted to be fresh.",
-            "The session journal has ordering but no reliable per-call latency or run_id fields.",
+            "Legacy execution records without origin_run_id are accepted only for single-run sessions.",
+            "Execution records from other runs are excluded from the selected report.",
             "No quality or efficiency score is derived.",
         ],
     }
@@ -325,7 +354,7 @@ def _human(report: dict[str, Any]) -> str:
               "  Signal counts overlap: one call may be counted in multiple signal categories.",
               "  Unflagged references are not proven fresh primary-source evidence.",
               "  Embedded-output calls are flagged, not silently treated as fresh primary evidence.",
-              "  Multi-run sessions without reliable per-call ownership are rejected."]
+              "  Multi-run sessions with unowned execution records are rejected."]
     return "\n".join(lines)
 
 

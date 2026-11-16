@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 from enum import Enum
+import re
 from typing import Any, Dict, List, Optional
 
 
@@ -10,6 +11,7 @@ from typing import Any, Dict, List, Optional
 INTERRUPTED_RESULT = ("Interrupted before a result was recorded. The tool may or may not have run, "
                       "so it was not re-executed. Verify its effects before relying on it.")
 SKIPPED_RESULT = "Skipped: not executed because the duplicate-call guardrail stopped this turn."
+_RUN_ID = re.compile(r"^run_[0-9a-f]{32}$")
 
 
 class ToolCallStatus(str, Enum):
@@ -32,9 +34,10 @@ class ToolExecutionRecord:
     status: ToolCallStatus = ToolCallStatus.PENDING
     outcome: Optional[str] = None
     error_category: Optional[str] = None
+    origin_run_id: Optional[str] = None
 
     def to_dict(self) -> Dict[str, Any]:
-        return {
+        record = {
             "tool_call_id": self.tool_call_id,
             "tool_name": self.tool_name,
             "arguments": self.arguments,
@@ -42,6 +45,9 @@ class ToolExecutionRecord:
             "outcome": self.outcome,
             "error_category": self.error_category,
         }
+        if self.origin_run_id is not None:
+            record["origin_run_id"] = self.origin_run_id
+        return record
 
     @classmethod
     def from_dict(cls, data: Dict[str, Any]) -> "ToolExecutionRecord":
@@ -60,13 +66,16 @@ class ToolExecutionRecord:
             raise ExecutionStateError("execution record has invalid tool metadata")
         outcome = data.get("outcome")
         category = data.get("error_category")
+        origin_run_id = data.get("origin_run_id")
         if outcome is not None and not isinstance(outcome, str):
             raise ExecutionStateError("execution outcome must be a string or null")
         if category is not None and not isinstance(category, str):
             raise ExecutionStateError("execution error_category must be a string or null")
+        if origin_run_id is not None and (not isinstance(origin_run_id, str) or not _RUN_ID.fullmatch(origin_run_id)):
+            raise ExecutionStateError("execution record has an invalid origin_run_id")
         if status in (ToolCallStatus.COMPLETED, ToolCallStatus.FAILED, ToolCallStatus.UNKNOWN) and outcome is None:
             raise ExecutionStateError("terminal execution records require an outcome")
-        return cls(call_id, name, arguments, status, outcome, category)
+        return cls(call_id, name, arguments, status, outcome, category, origin_run_id)
 
 
 class ExecutionJournal:
@@ -89,10 +98,13 @@ class ExecutionJournal:
     def to_dicts(self) -> List[Dict[str, Any]]:
         return [record.to_dict() for record in self.records]
 
-    def register(self, call_id: str, name: str, arguments: Any) -> ToolExecutionRecord:
+    def register(self, call_id: str, name: str, arguments: Any,
+                 origin_run_id: Optional[str] = None) -> ToolExecutionRecord:
         if call_id in self._by_id:
             raise ExecutionStateError(f"duplicate tool_call_id: {call_id}")
-        record = ToolExecutionRecord(call_id, name, arguments)
+        if origin_run_id is not None and (not isinstance(origin_run_id, str) or not _RUN_ID.fullmatch(origin_run_id)):
+            raise ExecutionStateError("execution record has an invalid origin_run_id")
+        record = ToolExecutionRecord(call_id, name, arguments, origin_run_id=origin_run_id)
         self.records.append(record)
         self._by_id[call_id] = record
         return record

@@ -271,6 +271,39 @@ def test_pending_recovery_becomes_unknown_without_dispatch():
     assert recovered[0].outcome == "interrupted"
 
 
+def test_new_execution_record_is_owned_by_the_current_run(run_loop, streamed_response, tmp_sessions):
+    run_loop(
+        [
+            streamed_response(finish_reason="tool_calls", tool_calls=[_call()]),
+            streamed_response(finish_reason="stop", content="done"),
+        ],
+        dispatch_fn=lambda *a, **k: "read result",
+        session_id="owned",
+    )
+
+    saved = session.load_session("owned")
+    assert saved["execution"][0]["origin_run_id"] == saved["runs"][-1]["run_id"]
+
+
+def test_legacy_execution_record_without_origin_run_id_remains_compatible():
+    journal = execution.ExecutionJournal.from_dicts([{
+        "tool_call_id": "call_legacy", "tool_name": "read_file", "arguments": {},
+        "status": "pending", "outcome": None, "error_category": None,
+    }])
+
+    assert journal.get("call_legacy").origin_run_id is None
+    assert "origin_run_id" not in journal.to_dicts()[0]
+
+
+def test_invalid_origin_run_id_is_rejected():
+    with pytest.raises(execution.ExecutionStateError, match="origin_run_id"):
+        execution.ExecutionJournal.from_dicts([{
+            "tool_call_id": "call_bad", "tool_name": "read_file", "arguments": {},
+            "status": "pending", "outcome": None, "error_category": None,
+            "origin_run_id": "run-not-valid",
+        }])
+
+
 def test_pending_is_persisted_before_dispatch_and_terminal_result(tmp_path, monkeypatch, run_loop, streamed_response):
     snapshots = []
 
