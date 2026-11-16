@@ -258,6 +258,24 @@ def test_file_fsync_failure_keeps_the_previous_valid_file(tmp_sessions, monkeypa
     assert not list(session.SESSIONS_DIR.glob("integrity.json.tmp"))
 
 
+def test_directory_fsync_failure_reports_ambiguous_durability_after_replace(tmp_sessions, monkeypatch):
+    previous = _messages()
+    next_messages = _messages({"role": "user", "content": "new"})
+    session.save_session("integrity", "old", previous, execution=_journal())
+
+    def refuse_directory_fsync(_directory):
+        raise OSError("directory fsync refused")
+
+    monkeypatch.setattr(session, "_fsync_directory", refuse_directory_fsync)
+    with pytest.raises(OSError, match="directory fsync refused"):
+        session.save_session("integrity", "new", next_messages, execution=_journal())
+
+    loaded = session.load_session("integrity")
+    assert loaded["goal"] == "new"
+    assert loaded["messages"] == next_messages
+    assert not (tmp_sessions / "integrity.json.tmp").exists()
+
+
 def test_orphan_temp_file_does_not_replace_a_valid_session(tmp_sessions):
     _seed()
     (tmp_sessions / "integrity.json.tmp").write_text("{not a session", encoding="utf-8")
