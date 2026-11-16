@@ -169,6 +169,20 @@ def test_evidence_outcome_contradicting_its_journal_record_is_rejected_before_sa
         runs=[_run_record(run_id, [ev])], evidence=[_evidence_record(ev, run_id, outcome="succeeded")]))
 
 
+def test_evidence_cannot_reference_a_journal_call_owned_by_another_run(tmp_sessions):
+    run_a = "run_" + "a" * 32
+    run_b = "run_" + "b" * 32
+    evidence_id = "ev_" + "a" * 32
+    journal = _journal()
+    journal[0]["origin_run_id"] = run_a
+    before = _seed()
+
+    _assert_rejected_and_unchanged("integrity", before, lambda: session.save_session(
+        "integrity", "goal", _messages(), execution=journal,
+        runs=[_run_record(run_a), _run_record(run_b, [evidence_id])],
+        evidence=[_evidence_record(evidence_id, run_b)]))
+
+
 @pytest.mark.parametrize("run_id", ["run-42", "run_XYZ", "", 7, None])
 def test_corrupt_run_identifiers_are_rejected_before_save(tmp_sessions, run_id):
     before = _seed()

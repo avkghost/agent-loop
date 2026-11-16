@@ -182,6 +182,10 @@ def _validate_evidence_references(data: Dict[str, Any], journal: ExecutionJourna
         if call is None:
             raise SessionValidationError(
                 f"evidence {record.evidence_id} cites a journal record that does not exist")
+        if call.origin_run_id is not None and call.origin_run_id != record.run_id:
+            raise SessionValidationError(
+                f"evidence {record.evidence_id} belongs to {record.run_id} but its journal record "
+                f"belongs to {call.origin_run_id}")
         if call.status.value != expected[record.outcome]:
             raise SessionValidationError(
                 f"evidence {record.evidence_id} claims {record.outcome} but its journal record is {call.status.value}")
