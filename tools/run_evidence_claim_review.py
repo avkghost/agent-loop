@@ -218,9 +218,9 @@ def build_fixture(data: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     if min(s1, s2, s3, s4, s5, s6, s7) < 0:
         raise RunnerError("canonical evidence boundaries were not found")
 
-    _require_source_chunk(generic[s1:s2], "https://github.com/tokio-rs/axum/releases/tag/axum-v0.7.0", 2)
-    _require_source_chunk(typed[s4:s5], "https://github.com/tokio-rs/axum/releases/tag/axum-v0.7.0", 2)
-    _require_source_chunk(serve[s6:s7], "https://docs.rs/axum/0.7.0/axum/", 4)
+    _require_source_chunk(generic, "https://github.com/tokio-rs/axum/releases/tag/axum-v0.7.0", 2)
+    _require_source_chunk(typed, "https://github.com/tokio-rs/axum/releases/tag/axum-v0.7.0", 2)
+    _require_source_chunk(serve, "https://docs.rs/axum/0.7.0/axum/", 4)
 
     evidence = [
         {"id": "E1", "tool_call_id": "394757186", "source": "https://github.com/tokio-rs/axum/releases/tag/axum-v0.7.0", "chunk": "#2", "text": generic[s1:s2].rstrip()},
