@@ -87,11 +87,13 @@ def test_scoring_keeps_detection_and_correction_separate():
     review = {
         "findings": [
             {"id": "F1", "detected": True, "classification": "contradiction",
-             "evidence_ids": ["E1"], "uncertainty": "direct", "correction": "The types are no longer generic over the B type parameter.", "abstain": False},
+             "evidence_ids": ["E1"], "uncertainty": "direct", "correction": "The evidence does not establish that the types were removed.", "abstain": False},
             {"id": "F2", "detected": True, "classification": "unsupported",
-             "evidence_ids": ["E2"], "uncertainty": "impact is not established", "correction": "The project-specific impact is not established.", "abstain": False},
+             "evidence_ids": ["E1"], "uncertainty": "impact is not established", "correction": "The project-specific impact is not established.", "abstain": False},
             {"id": "F3", "detected": True, "classification": "insufficient_evidence",
              "evidence_ids": ["E3"], "uncertainty": "path absent", "correction": "The exact import path is not established.", "abstain": True},
+            {"id": "F4", "detected": True, "classification": "supported",
+             "evidence_ids": ["E1"], "uncertainty": "direct", "correction": "The B type parameter is no longer generic.", "abstain": False},
         ],
         "negative_controls": [{"id": "N1", "classification": "supported"},
                               {"id": "N2", "classification": "supported"},
@@ -114,6 +116,27 @@ def test_invented_typed_header_path_is_not_a_correction():
         "negative_controls": [], "insufficiency_control": {},
     })
     assert not score["findings"]["F3"]["correction_accuracy"]
+
+
+def test_abstention_may_quote_typed_header_path_when_denied():
+    score = _classification_score({
+        "findings": [{"id": "F3", "detected": True, "classification": "insufficient_evidence",
+                      "evidence_ids": ["E3"], "uncertainty": "path absent",
+                      "correction": "The evidence does not establish the exact path axum_extra::extract::TypedHeader.",
+                      "abstain": True}],
+        "negative_controls": [], "insufficiency_control": {},
+    })
+    assert score["findings"]["F3"]["correction_accuracy"]
+
+
+def test_supported_b_generic_claim_does_not_require_correction():
+    score = _classification_score({
+        "findings": [{"id": "F4", "detected": True, "classification": "supported",
+                      "evidence_ids": ["E1"], "uncertainty": "direct",
+                      "correction": "", "abstain": False}],
+        "negative_controls": [], "insufficiency_control": {},
+    })
+    assert score["findings"]["F4"]["correction_accuracy"]
 
 
 def test_dry_run_configuration_is_explicit():

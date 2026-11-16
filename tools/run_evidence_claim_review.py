@@ -40,7 +40,7 @@ REVIEW_REQUEST = """Review the target answer against the evidence bundle.
 Return exactly this JSON shape:
 {
   "findings": [
-    {"id":"F1|F2|F3", "detected":true,
+    {"id":"F1|F2|F3|F4", "detected":true,
      "classification":"contradiction|unsupported|supported|insufficient_evidence",
      "evidence_ids":["E1"], "uncertainty":"...",
      "correction":"...", "abstain":false}
@@ -60,6 +60,7 @@ HandlerWithoutStateExt, Handler, LayeredFuture, Layered, MethodRouter, Next,
 RequestExt, RouteFuture, Route, Router"
 F2: "No code changes required; this is an internal implementation detail."
 F3: "use axum_extra::extract::TypedHeader;"
+F4: "The listed types/traits are no longer generic over the request body B."
 N1: "axum::serve(listener, app).await.unwrap();"
 N2: "TypedHeader moved to axum-extra crate."
 N3: "axum::body::Body replaces the removed hyper::Body re-export."
@@ -79,6 +80,8 @@ Classification boundaries for this fixture:
   change as proof about these generic changes.
 - F3 asserts an exact import path. A crate move without that exact path is
   insufficient evidence; abstain rather than choosing or rejecting a path.
+- F4 asks only whether the B generic parameter was removed. Evidence stating
+  that the listed types/traits are no longer generic over B supports F4.
 
 Do not add fields outside the schema and do not provide an invented import path.
 
@@ -252,7 +255,7 @@ def build_fixture(data: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
 
 
 def _classification_score(review: dict[str, Any]) -> dict[str, Any]:
-    expected = {"F1": "contradiction", "F2": "unsupported", "F3": "insufficient_evidence"}
+    expected = {"F1": "contradiction", "F2": "unsupported", "F3": "insufficient_evidence", "F4": "supported"}
     findings = {item.get("id"): item for item in review.get("findings", [])
                 if isinstance(item, dict)}
     scores = {}
@@ -261,7 +264,8 @@ def _classification_score(review: dict[str, Any]) -> dict[str, Any]:
         scores[item_id] = {
             "detected": bool(item.get("detected")),
             "classification_correct": item.get("classification") == category,
-            "evidence_attributed": item_id.replace("F", "E") in item.get("evidence_ids", []),
+            "evidence_attributed": ("E1" if item_id in {"F1", "F2", "F4"} else item_id.replace("F", "E"))
+            in item.get("evidence_ids", []),
             "appropriate_uncertainty": (bool(item.get("abstain")) if item_id == "F3"
                                          else isinstance(item.get("uncertainty"), str)
                                          and bool(item.get("uncertainty"))),
@@ -279,15 +283,26 @@ def _classification_score(review: dict[str, Any]) -> dict[str, Any]:
 
 def _correction_is_bounded(item_id: str, item: dict[str, Any]) -> bool:
     correction = item.get("correction")
+    if item_id == "F4" and item.get("classification") == "supported" and correction == "":
+        return True
     if not isinstance(correction, str) or not correction.strip():
         return False
     lowered = correction.lower()
     if item_id == "F1":
-        return "no longer generic" in lowered or "b type" in lowered
+        return ("no longer generic" in lowered or "b type" in lowered
+                or "does not establish" in lowered or "not establish" in lowered)
     if item_id == "F2":
         return "not established" in lowered or "depends" in lowered or "unsupported" in lowered
     if item_id == "F3":
-        return bool(item.get("abstain")) and "axum_extra::extract::typedheader" not in lowered
+        if not item.get("abstain"):
+            return False
+        exact_path = "axum_extra::extract::typedheader" in lowered
+        denies_path = any(phrase in lowered for phrase in (
+            "does not establish", "does not provide", "not established",
+            "not provided", "insufficient evidence", "cannot confirm"))
+        return not exact_path or denies_path
+    if item_id == "F4":
+        return "no longer generic" in lowered or "b type" in lowered
     return False
 
 
