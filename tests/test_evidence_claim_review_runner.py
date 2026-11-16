@@ -161,6 +161,16 @@ def test_tool_content_rejects_error_or_malformed_evidence_envelopes():
         runner._tool_content({"execution": [{"tool_call_id": "c", "outcome": "not-json"}]}, "c")
 
 
+def test_source_chunk_marker_must_match_declared_evidence():
+    runner._require_source_chunk(
+        "https://docs.rs/axum/0.7.0/axum/ #4: evidence",
+        "https://docs.rs/axum/0.7.0/axum/", 4)
+    with pytest.raises(runner.RunnerError, match="source/chunk marker"):
+        runner._require_source_chunk(
+            "https://docs.rs/axum/0.7.0/axum/ #3: evidence",
+            "https://docs.rs/axum/0.7.0/axum/", 4)
+
+
 def test_endpoint_normalization_and_markdown_rejection():
     assert runner.normalize_endpoint("http://127.0.0.1:1234/v1") == "http://127.0.0.1:1234/v1"
     assert runner.normalize_endpoint("http://127.0.0.1:1234/v1/chat/completions") == "http://127.0.0.1:1234/v1"

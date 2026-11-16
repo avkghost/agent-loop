@@ -181,6 +181,12 @@ def _validate_target_provenance(data: dict[str, Any]) -> None:
                 f"evidence tool call {item.get('tool_call_id')} belongs to a different run: {origin_run_id}")
 
 
+def _require_source_chunk(text: str, source: str, chunk: int) -> None:
+    marker = f"{source} #{chunk}:"
+    if marker not in text:
+        raise RunnerError(f"evidence text does not contain the declared source/chunk marker: {marker}")
+
+
 def build_fixture(data: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     """Build the canonical fixture from persisted observations without writing it."""
     _validate_target_provenance(data)
@@ -206,6 +212,10 @@ def build_fixture(data: dict[str, Any]) -> tuple[dict[str, Any], str, str]:
     s7 = serve.find("Note using", s6)
     if min(s1, s2, s3, s4, s5, s6, s7) < 0:
         raise RunnerError("canonical evidence boundaries were not found")
+
+    _require_source_chunk(generic[s1:s2], "https://github.com/tokio-rs/axum/releases/tag/axum-v0.7.0", 2)
+    _require_source_chunk(typed[s4:s5], "https://github.com/tokio-rs/axum/releases/tag/axum-v0.7.0", 2)
+    _require_source_chunk(serve[s6:s7], "https://docs.rs/axum/0.7.0/axum/", 4)
 
     evidence = [
         {"id": "E1", "tool_call_id": "394757186", "source": "https://github.com/tokio-rs/axum/releases/tag/axum-v0.7.0", "chunk": "#2", "text": generic[s1:s2].rstrip()},
