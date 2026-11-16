@@ -254,8 +254,9 @@ def _inspect_session(session_id: str) -> None:
     for record in records:
         status = record.get("status", "unknown")
         category = record.get("error_category") or "-"
+        origin = record.get("origin_run_id") or "legacy"
         print(f"   • {record.get('tool_call_id', '<missing>')} {record.get('tool_name', '<missing>')} "
-              f"status={status} category={category}")
+              f"status={status} category={category} origin={origin}")
         if status == "unknown":
             print(f"     outcome: {record.get('outcome')}")
 

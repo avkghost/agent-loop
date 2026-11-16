@@ -42,6 +42,7 @@ def test_malformed_session_returns_none(tmp_sessions):
 
 
 def test_cli_inspect_shows_unknown_execution_without_resuming(tmp_sessions, capsys):
+    run_id = "run_" + "a" * 32
     messages = [
         {"role": "system", "content": "system"},
         {"role": "assistant", "content": "calling", "tool_calls": [
@@ -53,13 +54,14 @@ def test_cli_inspect_shows_unknown_execution_without_resuming(tmp_sessions, caps
     session.save_session("inspect-me", "goal", messages, execution=[{
         "tool_call_id": "call_unknown", "tool_name": "write_file", "arguments": {},
         "status": "unknown", "outcome": session.INTERRUPTED_RESULT,
-        "error_category": "unknown_outcome",
+        "error_category": "unknown_outcome", "origin_run_id": run_id,
     }])
 
     cli.main(["inspect", "inspect-me"])
 
     output = capsys.readouterr().out
     assert "status=unknown category=unknown_outcome" in output
+    assert f"origin={run_id}" in output
     assert session.INTERRUPTED_RESULT in output
 
 
