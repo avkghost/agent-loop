@@ -166,6 +166,9 @@ def _validate_target_provenance(data: dict[str, Any]) -> None:
     for item in data.get("execution", []):
         if not isinstance(item, dict) or item.get("tool_call_id") not in EVIDENCE_CALL_IDS:
             continue
+        if item.get("status") != "completed":
+            raise RunnerError(
+                f"evidence tool call {item.get('tool_call_id')} is not completed: {item.get('status')}")
         origin_run_id = item.get("origin_run_id")
         if origin_run_id is not None and origin_run_id != DEFAULT_RUN_ID:
             raise RunnerError(

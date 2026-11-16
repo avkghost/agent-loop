@@ -123,7 +123,7 @@ def test_dry_run_configuration_is_explicit():
 
 def test_target_provenance_requires_the_pinned_run_and_rejects_explicit_mismatch():
     base = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
-        {"tool_call_id": "394757186", "origin_run_id": None},
+        {"tool_call_id": "394757186", "origin_run_id": None, "status": "completed"},
     ]}
     runner._validate_target_provenance(base)
 
@@ -131,10 +131,16 @@ def test_target_provenance_requires_the_pinned_run_and_rejects_explicit_mismatch
         runner._validate_target_provenance({"runs": [], "execution": []})
 
     mismatch = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
-        {"tool_call_id": "394757186", "origin_run_id": "run_" + "a" * 32},
+        {"tool_call_id": "394757186", "origin_run_id": "run_" + "a" * 32, "status": "completed"},
     ]}
     with pytest.raises(runner.RunnerError, match="different run"):
         runner._validate_target_provenance(mismatch)
+
+    incomplete = {"runs": [{"run_id": runner.DEFAULT_RUN_ID}], "execution": [
+        {"tool_call_id": "394757186", "origin_run_id": None, "status": "unknown"},
+    ]}
+    with pytest.raises(runner.RunnerError, match="not completed"):
+        runner._validate_target_provenance(incomplete)
 
 
 def test_endpoint_normalization_and_markdown_rejection():
